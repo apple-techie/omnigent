@@ -10,6 +10,23 @@ executor:
     # settings disable ``bypassPermissions``. ``auto`` auto-approves without
     # prompting and is allowed under managed settings (-> ``--permission-mode auto``).
     permission_mode: auto
+  # Compaction summarizer model + endpoint. Server-side /compact resolves the
+  # summarizer LLM from executor.model (server/routes/sessions.py) and forwards
+  # executor.connection verbatim to the runner's /v1/summarize as the LLM
+  # connection (base_url + api_key). Without a model here, /compact raises
+  # "Compaction requires a configured LLM model". gpt-5.4-mini is served by the
+  # Kainotomic OpenAI-compatible gateway for this deployment.
+  #
+  # SECRET HANDLING: api_key is an env-ref, NOT a literal — never commit the
+  # key. It is expanded at bundle-load against the OMNIGENT_ server process
+  # environment (the omnigent-server container exports
+  # OMNIGENT_KAINOTOMIC_API_KEY). executor.connection feeds only the
+  # compaction/LLM connection; it is NOT read by the claude-native harness
+  # spawn-env builder, so the coding sub-agent's own auth/endpoint is unchanged.
+  model: gpt-5.4-mini
+  connection:
+    base_url: https://openai.kainotomic.com/v1
+    api_key: ${OMNIGENT_KAINOTOMIC_API_KEY}
 
 prompt: |
   You are Claude Code, a coding sub-agent dispatched by the polly
