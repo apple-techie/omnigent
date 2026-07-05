@@ -170,6 +170,70 @@ def test_resolve_provider_key_kind_resolves_family_credential(
     assert provider.api_key == "sk-ant-test"
 
 
+@pytest.mark.parametrize(
+    "harness",
+    ["opencode", "opencode-native", "native-opencode", "hermes", "hermes-native", "native-hermes"],
+)
+def test_resolve_provider_own_auth_harness_resolves_configured_key_provider(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, harness: str
+) -> None:
+    """OpenCode / Hermes resolve a configured provider like kimi, not ``none``.
+
+    These are own-auth, multi-provider CLI harnesses with no SDK sibling;
+    they take the same identity-entry treatment as kimi. A configured
+    default key provider must resolve to a real ``key`` listing via the
+    multi-family branch — a regression here (e.g. the pre-fix
+    ``_KEY_AUTH_FAMILY`` subscript) would collapse the row to ``none`` and
+    ``sys_list_models`` would hide the models Omnigent can actually drive.
+
+    :param monkeypatch: Pytest monkeypatch fixture.
+    :param tmp_path: Per-test temp dir.
+    :param harness: The own-auth harness spelling under test.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    _isolate_config(
+        monkeypatch,
+        tmp_path,
+        "providers:\n"
+        "  anthropic:\n"
+        "    kind: key\n"
+        "    default: true\n"
+        "    anthropic:\n"
+        "      base_url: https://api.anthropic.com\n"
+        "      api_key: $ANTHROPIC_API_KEY\n",
+    )
+    provider = resolve_model_provider(_worker_spec(harness), harness)
+    assert provider.kind == "key", f"harness {harness}: {provider}"
+    assert provider.family == "anthropic"
+    assert provider.api_key == "sk-ant-test"
+
+
+@pytest.mark.parametrize(
+    "harness",
+    ["opencode-native", "hermes-native"],
+)
+def test_resolve_provider_own_auth_harness_unconfigured_is_honest_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, harness: str
+) -> None:
+    """Unconfigured OpenCode / Hermes report an honest ``none``, not "unknown".
+
+    Before the identity entry these harnesses fell through to the
+    "harness ... has no model-provider resolution" branch — misleading,
+    since Omnigent *can* drive their models given a configured provider.
+    With nothing configured the row must instead carry the honest
+    legacy-auth "no model provider configured" note.
+
+    :param monkeypatch: Pytest monkeypatch fixture.
+    :param tmp_path: Per-test temp dir.
+    :param harness: The own-auth harness spelling under test.
+    """
+    _isolate_config(monkeypatch, tmp_path, "")
+    provider = resolve_model_provider(_worker_spec(harness), harness)
+    assert provider.kind == "none"
+    assert provider.detail == "no model provider configured"
+    assert "has no model-provider resolution" not in provider.detail
+
+
 def test_resolve_provider_subscription_default(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
