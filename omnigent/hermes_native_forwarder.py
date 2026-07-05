@@ -52,16 +52,26 @@ import httpx
 
 from omnigent import hermes_native_status
 from omnigent.hermes_native_items import (
+    _ATTACHMENT_MARKER_RE as _ATTACHMENT_MARKER_RE,
+)
+from omnigent.hermes_native_items import (
+    _SKILL_INVOKE_RE as _SKILL_INVOKE_RE,
+)
+from omnigent.hermes_native_items import (
     HermesMirrorItem,
     assistant_row_has_tool_calls,
     message_to_items,
 )
 
 # Backwards-compatible private aliases. The pure ``messages``-row → item
-# conversion now lives in :mod:`omnigent.hermes_native_items` (shared with
-# session adoption); these keep the forwarder's original private names working
-# for internal callers and existing tests that reference ``f._MirrorItem`` /
-# ``f._message_to_items`` / ``f._assistant_row_has_tool_calls``.
+# conversion (and its two content-scrubbing regexes) now lives in
+# :mod:`omnigent.hermes_native_items` (shared with session adoption); these keep
+# every moved symbol importable under its original forwarder name for internal
+# callers and existing tests that reference ``f._MirrorItem`` /
+# ``f._message_to_items`` / ``f._assistant_row_has_tool_calls`` /
+# ``f._ATTACHMENT_MARKER_RE`` / ``f._SKILL_INVOKE_RE``. ``_ATTACHMENT_MARKER_RE``
+# and ``_SKILL_INVOKE_RE`` are imported above so they are already re-exported;
+# these assignments cover the renamed public helpers.
 _MirrorItem = HermesMirrorItem
 _message_to_items = message_to_items
 _assistant_row_has_tool_calls = assistant_row_has_tool_calls

@@ -12,11 +12,142 @@ same helpers through the forwarders; this file is the standalone contract.
 
 from __future__ import annotations
 
+import importlib
 import json
+
+import pytest
 
 from omnigent import claude_transcript_parser as claude
 from omnigent import codex_native_items as codex
 from omnigent import hermes_native_items as hermes
+
+# --------------------------------------------------------------------------- #
+# Re-export contract: every symbol moved into a shared parser module in Slice 1
+# must stay importable under its ORIGINAL forwarder/bridge name (zero-behaviour
+# transition contract). This locks the "moved-without-alias" regression class —
+# a symbol relocated to the new module but not re-exported would break a live
+# `from omnigent.<forwarder> import <sym>` caller.
+# --------------------------------------------------------------------------- #
+
+# Original name on the forwarder/bridge -> attribute expected on the shared module
+# it now lives in. ``None`` means the same name exists on the shared module too;
+# a string means the shared module renamed it (Hermes' public dataclass/helpers).
+_HERMES_REEXPORTS = {
+    "_MirrorItem": "HermesMirrorItem",
+    "_message_to_items": "message_to_items",
+    "_assistant_row_has_tool_calls": "assistant_row_has_tool_calls",
+    "_ATTACHMENT_MARKER_RE": None,
+    "_SKILL_INVOKE_RE": None,
+}
+
+_CLAUDE_REEXPORTS = [
+    "ClaudeTranscriptItem",
+    "TranscriptReadResult",
+    "_JsonlRecord",
+    "_JsonlReadResult",
+    "_read_complete_jsonl_records",
+    "read_assistant_text_since",
+    "read_transcript_items_since",
+    "read_transcript_items_since_with_position",
+    "read_transcript_items_from_offset",
+    "_model_from_transcript_entry",
+    "_usage_from_transcript_entry",
+    "_assistant_text_from_transcript_line",
+    "_transcript_items_from_entry",
+    "_attachment_transcript_items_from_entry",
+    "_local_command_transcript_items_from_entry",
+    "_terminal_command_items_from_content",
+    "_user_transcript_items_from_entry",
+    "_assistant_transcript_items_from_entry",
+    "_assistant_message_item",
+    "_tool_result_output",
+    "_SlashCommandPayload",
+    "_parse_slash_command_record",
+    "_transcript_source_key",
+    "_parent_or_record_source_key",
+    "_response_id_from_source",
+    "_source_id",
+    "_COMMAND_NAME_RE",
+    "_COMMAND_ARGS_RE",
+    "_COMMAND_STDOUT_RE",
+    "_BASH_INPUT_RE",
+    "_BASH_STDOUT_RE",
+    "_BASH_STDERR_RE",
+    "_CLI_SCAFFOLDING_MARKERS",
+    "_CLAUDE_CLI_DROPPED_COMMANDS",
+    "_CLAUDE_CLI_SURFACED_COMMANDS",
+    "_CONTEXT_OVERFLOW_RE",
+    "_CONTEXT_OVERFLOW_REPLACEMENT",
+]
+
+_CODEX_REEXPORTS = [
+    "_CODEX_ERROR_ITEM_TYPE",
+    "_CODEX_AUTH_ERROR_INFO",
+    "_CODEX_AUTH_HTTP_STATUS",
+    "_CODEX_AUTH_ERROR_FRAGMENTS",
+    "_CODEX_ERROR_KIND_AUTH",
+    "_CODEX_ERROR_KIND_GENERIC",
+    "_CODEX_REAUTH_HINT",
+    "_CodexToolCall",
+    "_CodexTerminalError",
+    "_classify_codex_error",
+    "_error_payload_message",
+    "_error_item_from_turn",
+    "_terminal_error_from_turn",
+    "_CodexTurnStatusEdge",
+    "_ToolItemBuilder",
+    "_omnigent_status_from_resume_turn",
+    "_CODEX_SANDBOX_NAMESPACE_ERROR_MARKER",
+    "_CODEX_SANDBOX_BYPASS_GUIDANCE",
+    "_augment_sandbox_namespace_error",
+    "_codex_tool_call_from_item",
+    "_command_execution_tool_call",
+    "_file_change_tool_call",
+    "_web_search_tool_call",
+    "_image_view_tool_call",
+    "_image_generation_tool_call",
+    "_TOOL_ITEM_BUILDERS",
+    "_TOOL_ITEM_TYPES",
+    "_turn_id_from_payload",
+    "_source_id",
+    "iter_resume_items",
+]
+
+
+@pytest.mark.parametrize("original_name,shared_name", sorted(_HERMES_REEXPORTS.items()))
+def test_hermes_forwarder_reexports_moved_symbols(
+    original_name: str, shared_name: str | None
+) -> None:
+    fwd = importlib.import_module("omnigent.hermes_native_forwarder")
+    items = importlib.import_module("omnigent.hermes_native_items")
+    assert hasattr(fwd, original_name), (
+        f"{original_name} was moved to hermes_native_items but is no longer importable "
+        f"from hermes_native_forwarder — restore the re-export alias."
+    )
+    assert getattr(fwd, original_name) is getattr(items, shared_name or original_name)
+
+
+@pytest.mark.parametrize("name", sorted(_CLAUDE_REEXPORTS))
+def test_claude_bridge_reexports_moved_symbols(name: str) -> None:
+    bridge = importlib.import_module("omnigent.claude_native_bridge")
+    parser = importlib.import_module("omnigent.claude_transcript_parser")
+    assert hasattr(bridge, name), (
+        f"{name} was moved to claude_transcript_parser but is no longer importable "
+        f"from claude_native_bridge — restore the re-export alias."
+    )
+    assert getattr(bridge, name) is getattr(parser, name)
+
+
+@pytest.mark.parametrize("name", sorted(_CODEX_REEXPORTS))
+def test_codex_forwarder_reexports_moved_symbols(name: str) -> None:
+    fwd = importlib.import_module("omnigent.codex_native_forwarder")
+    items = importlib.import_module("omnigent.codex_native_items")
+    assert hasattr(fwd, name), (
+        f"{name} was moved to codex_native_items but is no longer importable "
+        f"from codex_native_forwarder — restore the re-export alias."
+    )
+    assert getattr(fwd, name) is getattr(items, name)
+
 
 # --------------------------------------------------------------------------- #
 # Hermes: messages-row -> mirror items
