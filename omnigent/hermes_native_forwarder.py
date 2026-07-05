@@ -43,7 +43,6 @@ import contextlib
 import json
 import logging
 import os
-import re
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -52,6 +51,20 @@ from pathlib import Path
 import httpx
 
 from omnigent import hermes_native_status
+from omnigent.hermes_native_items import (
+    HermesMirrorItem,
+    assistant_row_has_tool_calls,
+    message_to_items,
+)
+
+# Backwards-compatible private aliases. The pure ``messages``-row → item
+# conversion now lives in :mod:`omnigent.hermes_native_items` (shared with
+# session adoption); these keep the forwarder's original private names working
+# for internal callers and existing tests that reference ``f._MirrorItem`` /
+# ``f._message_to_items`` / ``f._assistant_row_has_tool_calls``.
+_MirrorItem = HermesMirrorItem
+_message_to_items = message_to_items
+_assistant_row_has_tool_calls = assistant_row_has_tool_calls
 
 _logger = logging.getLogger(__name__)
 
@@ -96,18 +109,6 @@ def _warn_sqlite_once(context: str, exc: sqlite3.Error) -> None:
     _warned_sqlite_errors.add(key)
     _logger.warning("hermes forwarder sqlite error during %s: %s", context, exc)
 
-
-# The executor injects ``[Attached: <path>]`` markers for web-UI attachments
-# before pasting into the TUI; strip them from the mirrored bubble (the path is
-# an internal bridge detail).
-_ATTACHMENT_MARKER_RE = re.compile(r"\[Attached:[^\]]*\]")
-
-# Hermes injects skill content as a user message prefixed with this marker.
-# The full skill prompt is not useful in the web UI — replace it with a
-# short summary so the chat view stays clean.
-_SKILL_INVOKE_RE = re.compile(
-    r'^\[IMPORTANT: The user has invoked the "(?P<name>[^"]+)" skill',
-)
 
 #: Maximum characters for a tool output mirrored into the web UI chat view.
 #: Longer outputs are truncated so skill loads and other verbose results don't
@@ -432,118 +433,6 @@ def _same_path(a: str, b: str) -> bool:
         return a == b
 
 
-@dataclass
-class _MirrorItem:
-    """One conversation item ready to POST, plus the message id that produced it."""
-
-    msg_id: int
-    item_type: str
-    item_data: dict[str, object]
-    response_id: str
-
-
-def _message_to_items(
-    msg_id: int,
-    role: object,
-    content: object,
-    tool_calls: object,
-    tool_call_id: object,
-    tool_name: object,  # noqa: ARG001 — reserved for future use (e.g. logging)
-    agent_name: str,
-) -> list[_MirrorItem]:
-    """Convert one ``messages`` row to mirror items.
-
-    An assistant row with ``tool_calls`` emits a ``function_call`` item per
-    call, followed by a ``message`` item if it also has prose content. A tool
-    row emits a ``function_call_output`` item. Returns an empty list to skip.
-    """
-    if not isinstance(role, str):
-        return []
-    text = ""
-    if isinstance(content, str):
-        text = _ATTACHMENT_MARKER_RE.sub("", content).strip()
-    response_id = f"hermes:{msg_id}"
-
-    if role == "user":
-        if not text:
-            return []
-        # Hermes injects skill content as a user message — replace with
-        # a short summary so the chat view stays readable.
-        skill_match = _SKILL_INVOKE_RE.match(text)
-        if skill_match:
-            text = f"/{skill_match.group('name')}"
-        return [
-            _MirrorItem(
-                msg_id=msg_id,
-                item_type="message",
-                item_data={"role": "user", "content": [{"type": "input_text", "text": text}]},
-                response_id=response_id,
-            )
-        ]
-
-    if role == "assistant":
-        items: list[_MirrorItem] = []
-        # Parse tool_calls JSON — assistant rows may include tool call requests.
-        if isinstance(tool_calls, str) and tool_calls:
-            try:
-                calls = json.loads(tool_calls)
-            except (json.JSONDecodeError, ValueError):
-                calls = []
-            if isinstance(calls, list):
-                for call in calls:
-                    if not isinstance(call, dict):
-                        continue
-                    call_id = call.get("call_id") or call.get("id") or ""
-                    func = call.get("function", {})
-                    name = func.get("name", "") if isinstance(func, dict) else ""
-                    arguments = func.get("arguments", "{}") if isinstance(func, dict) else "{}"
-                    if call_id and name:
-                        items.append(
-                            _MirrorItem(
-                                msg_id=msg_id,
-                                item_type="function_call",
-                                item_data={
-                                    "agent": agent_name,
-                                    "name": name,
-                                    "arguments": arguments,
-                                    "call_id": call_id,
-                                },
-                                response_id=response_id,
-                            )
-                        )
-        # Also emit a message item if there's prose content.
-        if text:
-            items.append(
-                _MirrorItem(
-                    msg_id=msg_id,
-                    item_type="message",
-                    item_data={
-                        "role": "assistant",
-                        "agent": agent_name,
-                        "content": [{"type": "output_text", "text": text}],
-                    },
-                    response_id=response_id,
-                )
-            )
-        return items
-
-    if role == "tool":
-        # Tool result row — emit function_call_output.
-        if isinstance(tool_call_id, str) and tool_call_id:
-            output = text or ""
-            return [
-                _MirrorItem(
-                    msg_id=msg_id,
-                    item_type="function_call_output",
-                    item_data={"call_id": tool_call_id, "output": output},
-                    response_id=response_id,
-                )
-            ]
-        return []
-
-    return []
-
-
 def _read_new_items(
     db_path: Path, hermes_session_id: str, last_id: int, agent_name: str
 ) -> list[_MirrorItem]:
@@ -577,25 +466,6 @@ def _read_new_items(
         else:
             items.append(_MirrorItem(msg_id=msg_id, item_type="", item_data={}, response_id=""))
     return items
-
-
-def _assistant_row_has_tool_calls(tool_calls: object) -> bool:
-    """Whether an assistant ``messages`` row carries a non-empty ``tool_calls`` list.
-
-    Hermes writes one ``messages`` row per agentic step (complete, append-only —
-    rows are never updated in place, which is why message mirroring keys off
-    ``id > last_id``). An assistant row with one or more tool calls means the loop
-    continues (a tool result + further assistant step follow); a row with no tool
-    calls is the loop's terminal step — the model returning its final answer.
-    Mirrors the ``tool_calls`` parsing in :func:`_message_to_items`.
-    """
-    if not isinstance(tool_calls, str) or not tool_calls.strip():
-        return False
-    try:
-        calls = json.loads(tool_calls)
-    except (json.JSONDecodeError, ValueError):
-        return False
-    return isinstance(calls, list) and len(calls) > 0
 
 
 def _count_completed_turns(db_path: Path, hermes_session_id: str) -> int:
