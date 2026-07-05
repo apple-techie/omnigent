@@ -11,7 +11,7 @@ executor:
   type: omnigent
   config:
     harness: opencode-native
-    model: ollama-cloud/glm-5.2
+  model: ollama-cloud/glm-5.2
 
 prompt: |
   You are OpenCode, a coding sub-agent dispatched by the polly
