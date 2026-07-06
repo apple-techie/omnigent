@@ -6501,7 +6501,8 @@ async def _maybe_respawn_conversation_runner(
         ``host_registry`` (a live tunnel), NOT the DB liveness row: only a
         replica holding the tunnel can send ``host.launch_runner``;
       * no concurrent respawn for this conversation;
-      * within the rolling retry budget.
+      * within the rolling retry budget;
+      * same runner still absent - closes the debounce/launch boundary race.
 
     On a passing gate set it mints a fresh runner via
     :func:`_launch_runner_on_host` (which rebinds the row) and waits for
@@ -6561,6 +6562,13 @@ async def _maybe_respawn_conversation_runner(
         return
     _auto_respawn_in_flight.add(conv.id)
     try:
+        if tunnel_registry.get(dead_runner_id) is not None:
+            _logger.info(
+                "Runner %s reconnected after debounce; no auto-respawn for session %s",
+                dead_runner_id,
+                conv.id,
+            )
+            return
         _record_auto_respawn_attempt(conv.id)
         _logger.warning(
             "Auto-respawning host-bound runner for session %s on live host %s "

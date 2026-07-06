@@ -403,6 +403,41 @@ class TestAutoRespawnAfterDisconnect:
         assert len(stub_launch) == 1
         assert store.replaced == [(conv.id, "runner_new")]
 
+    async def test_runner_reconnects_after_debounce_before_launch_does_not_respawn(
+        self, stub_launch: list[dict[str, object]], stub_wait_connected: None
+    ) -> None:
+        class _ReconnectsBeforeLaunchTunnel(_FakeTunnelRegistry):
+            gets: list[str]
+
+            def __init__(self) -> None:
+                super().__init__(reconnects={})
+                self.gets = []
+
+            def get(self, runner_id: str) -> object | None:
+                self.gets.append(runner_id)
+                return object()
+
+        conv = _make_conv()
+        store = _FakeConversationStore({conv.id: conv})
+        host_registry = _FakeHostRegistry({"host_1": object()})
+        tunnel = _ReconnectsBeforeLaunchTunnel()
+
+        await s._auto_respawn_runner_after_disconnect(
+            "runner_dead",
+            conversation_store=store,
+            host_registry=host_registry,
+            tunnel_registry=tunnel,
+            runner_router=None,
+            runner_exit_reports=None,
+        )
+
+        assert tunnel.waited == [("runner_dead", s._AUTO_RESPAWN_DEBOUNCE_S)]
+        assert tunnel.gets == ["runner_dead"]
+        assert stub_launch == []
+        assert store.replaced == []
+        assert store.convs[conv.id].runner_id == "runner_dead"
+        assert conv.id not in s._auto_respawn_attempts or not s._auto_respawn_attempts[conv.id]
+
     async def test_multiple_bound_convs_each_respawned(
         self, stub_launch: list[dict[str, object]], stub_wait_connected: None
     ) -> None:
