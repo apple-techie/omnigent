@@ -113,6 +113,22 @@ _PROVIDER_RESOLUTION_HARNESS: dict[str, str] = {
     # mirroring the claude-native -> claude-sdk rule above.
     "antigravity-native": "antigravity",
     "native-antigravity": "antigravity",
+    # OpenCode and Hermes are own-auth, multi-provider CLI harnesses that
+    # share no resolution path with an existing SDK sibling — same shape as
+    # kimi above, so they take the same identity-entry treatment. Omnigent
+    # drives their models via runner ``providers:`` config synthesis, so a
+    # configured provider resolves to a real listing; the identity entry
+    # both surfaces that listing and keeps the misleading "harness has no
+    # model-provider resolution" note off the row when nothing is
+    # configured (it degrades to the honest "no model provider configured"
+    # legacy-auth note instead). Like kimi, they route via the multi-family
+    # (pi-style) branch in ``_provider_from_entry`` — see the note there.
+    "opencode": "opencode",
+    "opencode-native": "opencode",
+    "native-opencode": "opencode",
+    "hermes": "hermes",
+    "hermes-native": "hermes",
+    "native-hermes": "hermes",
 }
 
 # Preferred inline family per single-family harness (pi consumes both).
@@ -533,9 +549,12 @@ def _provider_from_entry(entry: ProviderEntry, harness_type: str) -> ResolvedMod
         return ResolvedModelProvider(
             kind=SUBSCRIPTION_KIND, cli=entry.cli, detail=f"provider {entry.name!r}"
         )
-    # Inline-family kinds: single-family harnesses get exactly their family;
-    # pi takes the first whose credential resolves, anthropic preferred.
-    preferred = _KEY_AUTH_FAMILY[harness_type] if harness_type != "pi" else None
+    # Inline-family kinds: single-family harnesses get exactly their family.
+    # Harnesses absent from the map are multi-family (own-auth) — pi, kimi,
+    # opencode, hermes — and take the first whose credential resolves,
+    # anthropic preferred. ``.get`` (not a subscript) so those absent
+    # harnesses fall through to the multi-family branch instead of raising.
+    preferred = _KEY_AUTH_FAMILY.get(harness_type)
     candidates = (preferred,) if preferred is not None else _FAMILY_PREFERENCE
     for family_name in candidates:
         try:
