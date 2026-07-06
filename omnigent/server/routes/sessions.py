@@ -559,6 +559,34 @@ _RUNNER_CONVICTION_POLL_S = 0.25
 # through to the connect wait, preserving the prior fire-and-forget
 # behavior rather than blocking the turn.
 _HOST_LAUNCH_RESULT_TIMEOUT_S = 10.0
+# ── Host-bound runner auto-respawn tuning (issues #1857 / #1953 gap) ──
+# When a host-bound runner's tunnel drops unexpectedly while its host is
+# still online, ``_on_runner_disconnect`` schedules a proactive respawn
+# so an orphaned open session recovers without a manual "click to
+# reconnect". The knobs below bound that behavior; see
+# :func:`schedule_runner_auto_respawn`.
+#
+# Debounce before respawning: a transient tunnel flap that the runner
+# client reconnects on its own must NOT mint a duplicate runner. We wait
+# this window for the *same* runner id to re-register; if it does, we
+# abort the respawn. Matches the on-message ``_HOST_BOUND_RUNNER_CONNECT
+# _GRACE_S`` philosophy — long enough to ride out a WS blip, short enough
+# that a genuinely dead runner is replaced promptly.
+_AUTO_RESPAWN_DEBOUNCE_S = 5.0
+# Bound the respawn so a host that keeps killing its runner cannot become
+# an infinite relaunch loop. At most this many auto-respawns per
+# conversation inside the rolling window; past the cap the session falls
+# back to the manual / next-message relaunch path until the window
+# elapses.
+_AUTO_RESPAWN_MAX_ATTEMPTS = 3
+_AUTO_RESPAWN_WINDOW_S = 300.0
+# TTL for the "user intentionally stopped this runner" marker. Stop is
+# non-sticky — it drops the runner tunnel, firing ``_on_runner_disconnect``
+# indistinguishably from an unexpected death — so the stop path marks the
+# runner id here and the disconnect path consults it to avoid resurrecting
+# a session the user just stopped. Sized to comfortably cover the debounce
+# window; the disconnect follows the stop within seconds.
+_INTENTIONAL_STOP_MARKER_TTL_S = 60.0
 # Server-side wait budget for Claude's ``PermissionRequest`` hook. Set
 # to one day so a native permission prompt waits ~indefinitely for the
 # user to answer in EITHER the web UI or the terminal, rather than
@@ -6205,6 +6233,389 @@ async def _launch_runner_on_host(
             error=result.get("error"),
         )
     return _HostLaunchAttempt(runner_id=new_runner_id)
+
+
+# ── Host-bound runner auto-respawn (issues #1857 / #1953 gap) ────────
+#
+# A host-bound runner whose tunnel drops unexpectedly (the runner process
+# died, but its host's ``omnigent host`` tunnel is still online) leaves an
+# orphaned open session that today only recovers on the NEXT user message
+# (the message-dispatch relaunch path). This module proactively respawns
+# such a runner on its live host so the session reconnects on its own.
+#
+# It is deliberately conservative and HOST-BOUND ONLY:
+#   * It does nothing for CLI / ``local_stranded`` sessions (no host to
+#     relaunch on — those need a resident user-machine daemon we do not
+#     have) and nothing when the host tunnel is not live on THIS replica
+#     (only a replica holding the tunnel can send ``host.launch_runner``).
+#   * It never resurrects a runner the user intentionally Stopped.
+#   * It debounces a transient tunnel flap, dedups concurrent respawns per
+#     conversation, and caps retries so a host that keeps killing its
+#     runner cannot drive an infinite relaunch loop.
+# The successful-reconnect handoff (re-POST ``/v1/sessions``, relay
+# restart, clearing the stale ``runner_disconnected`` status) is NOT
+# duplicated here — it rides the existing ``_on_runner_connect`` callback
+# in ``server/app.py`` that fires when the fresh runner's tunnel registers.
+
+# runner_id -> monotonic expiry deadline for a deliberate Stop. Consulted
+# by the disconnect path so the tunnel drop Stop induces is not mistaken
+# for an unexpected death. Pruned lazily on access.
+_intentionally_stopped_runners: dict[str, float] = {}
+# Conversation ids with an auto-respawn in flight (concurrency guard: at
+# most one replacement runner per conversation at a time).
+_auto_respawn_in_flight: set[str] = set()
+# Conversation id -> monotonic timestamps of recent auto-respawn attempts
+# (rolling-window rate limit; see ``_AUTO_RESPAWN_MAX_ATTEMPTS``).
+_auto_respawn_attempts: dict[str, list[float]] = {}
+# Strong references to in-flight auto-respawn tasks. asyncio.create_task
+# results are weakly held by the loop; without a reference here a respawn
+# could be garbage-collected mid-flight. Discarded on completion, and
+# cancelled at server shutdown via ``cancel_auto_respawn_tasks``.
+_auto_respawn_tasks: set[asyncio.Task[None]] = set()
+
+
+def mark_runner_intentionally_stopped(runner_id: str) -> None:
+    """
+    Record that *runner_id* was Stopped by the user, so the disconnect
+    path does not auto-respawn it.
+
+    Stop is non-sticky: it drops the runner tunnel (see the
+    ``stop_session`` branch of the events endpoint and
+    :func:`_stop_session_host_runner`), which fires
+    ``_on_runner_disconnect`` exactly as an unexpected death would. This
+    marker is the only signal that tells the two apart, so it MUST be set
+    before the runner tunnel is brought down.
+
+    :param runner_id: Runner id being deliberately stopped, e.g.
+        ``"runner_token_abc123..."``.
+    :returns: None.
+    """
+    _prune_intentional_stop_markers()
+    _intentionally_stopped_runners[runner_id] = time.monotonic() + _INTENTIONAL_STOP_MARKER_TTL_S
+
+
+def _prune_intentional_stop_markers() -> None:
+    """Drop expired deliberate-stop markers so the map stays bounded."""
+    now = time.monotonic()
+    for rid in [r for r, exp in _intentionally_stopped_runners.items() if exp <= now]:
+        _intentionally_stopped_runners.pop(rid, None)
+
+
+def _runner_was_intentionally_stopped(runner_id: str) -> bool:
+    """Whether *runner_id* has a live deliberate-stop marker (prunes it)."""
+    exp = _intentionally_stopped_runners.get(runner_id)
+    if exp is None:
+        return False
+    if exp <= time.monotonic():
+        _intentionally_stopped_runners.pop(runner_id, None)
+        return False
+    return True
+
+
+def _auto_respawn_within_budget(conv_id: str) -> bool:
+    """
+    Whether *conv_id* is still under its rolling auto-respawn cap.
+
+    Prunes attempts older than :data:`_AUTO_RESPAWN_WINDOW_S` and reports
+    whether another respawn is allowed. Does NOT record an attempt — the
+    caller records one only when it actually launches, so a respawn a
+    safety gate short-circuits does not consume budget.
+    """
+    now = time.monotonic()
+    window = [
+        t for t in _auto_respawn_attempts.get(conv_id, []) if now - t < _AUTO_RESPAWN_WINDOW_S
+    ]
+    _auto_respawn_attempts[conv_id] = window
+    return len(window) < _AUTO_RESPAWN_MAX_ATTEMPTS
+
+
+def _record_auto_respawn_attempt(conv_id: str) -> None:
+    """Record that an auto-respawn was launched for *conv_id* just now."""
+    _auto_respawn_attempts.setdefault(conv_id, []).append(time.monotonic())
+
+
+async def cancel_auto_respawn_tasks() -> None:
+    """
+    Cancel and await every in-flight auto-respawn task.
+
+    Lifespan-teardown hook mirroring
+    :func:`cancel_managed_launch_tasks`: without it a respawn debounce or
+    connect-wait outlives ASGI shutdown and dies wherever the loop
+    teardown happens to kill it.
+
+    :returns: None once every task has settled.
+    """
+    tasks = list(_auto_respawn_tasks)
+    if not tasks:
+        return
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def schedule_runner_auto_respawn(
+    runner_id: str,
+    *,
+    conversation_store: ConversationStore,
+    host_registry: HostRegistry | None,
+    tunnel_registry: TunnelRegistry | None,
+    runner_router: RunnerRouter | None,
+    runner_exit_reports: RunnerExitReports | None,
+) -> None:
+    """
+    Schedule a bounded background respawn of a host-bound runner that just
+    dropped, iff its host is live on THIS replica.
+
+    Fire-and-forget: this never blocks the disconnect callback. The two
+    cheap gates that make scheduling pointless are checked inline (no host
+    tunnels wired at all; the runner was intentionally Stopped); every
+    other safety gate — debounce, host-liveness, host-bound-only, dedup,
+    rate-limit — lives in the task body (:func:`_auto_respawn_runner_after
+    _disconnect` / :func:`_maybe_respawn_conversation_runner`) so it runs
+    after the debounce settles against the current session state.
+
+    :param runner_id: The runner whose tunnel just dropped.
+    :param conversation_store: Store used for the by-runner lookup and the
+        ``replace_runner_id`` rebind inside ``_launch_runner_on_host``.
+    :param host_registry: In-memory host tunnels on this replica. ``None``
+        (host support not wired) short-circuits — there is no host to
+        relaunch on.
+    :param tunnel_registry: Runner-tunnel registry, used for the debounce
+        reconnect wait and the post-launch connect wait. ``None`` (no
+        runner tunnels, e.g. in-process tests) short-circuits.
+    :param runner_router: Router used to resolve the fresh runner's client.
+    :param runner_exit_reports: Crash-report store, so the connect wait
+        aborts the instant the daemon reports the new runner died.
+    :returns: None.
+    """
+    if host_registry is None or tunnel_registry is None:
+        # No host tunnels / runner tunnels wired (CLI-only or in-process
+        # test setups). There is no host to relaunch on, so auto-respawn
+        # does not apply — leave today's behavior untouched.
+        return
+    if _runner_was_intentionally_stopped(runner_id):
+        # The user Stopped this runner; the tunnel drop is expected. Do
+        # not resurrect it — respects the non-sticky Stop semantics.
+        _logger.info("Skipping auto-respawn for intentionally-stopped runner %s", runner_id)
+        return
+    task = asyncio.create_task(
+        _auto_respawn_runner_after_disconnect(
+            runner_id,
+            conversation_store=conversation_store,
+            host_registry=host_registry,
+            tunnel_registry=tunnel_registry,
+            runner_router=runner_router,
+            runner_exit_reports=runner_exit_reports,
+        )
+    )
+    _auto_respawn_tasks.add(task)
+    task.add_done_callback(_auto_respawn_tasks.discard)
+
+
+async def _auto_respawn_runner_after_disconnect(
+    runner_id: str,
+    *,
+    conversation_store: ConversationStore,
+    host_registry: HostRegistry,
+    tunnel_registry: TunnelRegistry,
+    runner_router: RunnerRouter | None,
+    runner_exit_reports: RunnerExitReports | None,
+) -> None:
+    """
+    Debounce a runner disconnect, then respawn every host-bound session
+    still pinned to the dead runner on its live host.
+
+    The debounce waits :data:`_AUTO_RESPAWN_DEBOUNCE_S` for the *same*
+    runner id to re-register — a transient WS flap the runner client rides
+    out on its own. If it reconnects, this aborts (the existing
+    ``_on_runner_connect`` path already handled recovery); otherwise the
+    runner is genuinely gone and each still-bound conversation is respawned
+    subject to the per-conversation safety gates.
+
+    :param runner_id: The disconnected runner id.
+    :param conversation_store: Store for the by-runner lookup / rebind.
+    :param host_registry: Live host tunnels on this replica.
+    :param tunnel_registry: Runner-tunnel registry (debounce + connect wait).
+    :param runner_router: Router to resolve the fresh runner's client.
+    :param runner_exit_reports: Crash-report store for the connect wait.
+    :returns: None.
+    """
+    try:
+        # Debounce: give the SAME runner a chance to reconnect on its own.
+        # ``wait_for_runner`` returns immediately if it is already back, or
+        # waits up to the window for a register event.
+        reconnected = await tunnel_registry.wait_for_runner(
+            runner_id, timeout_s=_AUTO_RESPAWN_DEBOUNCE_S
+        )
+        if reconnected is not None:
+            _logger.info(
+                "Runner %s reconnected within the %.1fs debounce; no auto-respawn",
+                runner_id,
+                _AUTO_RESPAWN_DEBOUNCE_S,
+            )
+            return
+        convs = await asyncio.to_thread(
+            conversation_store.list_conversations_by_runner_id, runner_id
+        )
+        for conv in convs:
+            await _maybe_respawn_conversation_runner(
+                conv,
+                dead_runner_id=runner_id,
+                conversation_store=conversation_store,
+                host_registry=host_registry,
+                tunnel_registry=tunnel_registry,
+                runner_router=runner_router,
+                runner_exit_reports=runner_exit_reports,
+            )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        # Fire-and-forget background task: never escape as an unhandled-task
+        # traceback. A failed respawn just leaves the manual path in place.
+        _logger.exception("Auto-respawn task crashed for runner %s", runner_id)
+
+
+async def _maybe_respawn_conversation_runner(
+    conv: Conversation,
+    *,
+    dead_runner_id: str,
+    conversation_store: ConversationStore,
+    host_registry: HostRegistry,
+    tunnel_registry: TunnelRegistry,
+    runner_router: RunnerRouter | None,
+    runner_exit_reports: RunnerExitReports | None,
+) -> None:
+    """
+    Respawn one conversation's runner on its live host, if every safety
+    gate passes. A no-op otherwise (each early return preserves today's
+    manual / next-message relaunch path).
+
+    Gates, in order:
+      * host-bound only — a session with no ``host_id`` is CLI /
+        ``local_stranded``; there is no host to relaunch on;
+      * still pinned — the row must still point at ``dead_runner_id`` (a
+        concurrent path may already have rebound it);
+      * not intentionally Stopped — re-checked after the debounce in case
+        the Stop landed during the wait;
+      * host live on THIS replica — gated on the in-memory
+        ``host_registry`` (a live tunnel), NOT the DB liveness row: only a
+        replica holding the tunnel can send ``host.launch_runner``;
+      * no concurrent respawn for this conversation;
+      * within the rolling retry budget.
+
+    On a passing gate set it mints a fresh runner via
+    :func:`_launch_runner_on_host` (which rebinds the row) and waits for
+    its tunnel; the successful-reconnect handoff rides ``_on_runner_connect``.
+
+    :param conv: A conversation returned by the by-runner lookup.
+    :param dead_runner_id: The runner id that just died.
+    :param conversation_store: Store for the rebind.
+    :param host_registry: Live host tunnels on this replica.
+    :param tunnel_registry: Runner-tunnel registry for the connect wait.
+    :param runner_router: Router to resolve the fresh runner's client.
+    :param runner_exit_reports: Crash-report store for the connect wait.
+    :returns: None.
+    """
+    # (3a) Host-bound only. No host_id ⇒ CLI / local_stranded — nothing to
+    # relaunch on; leave the manual path.
+    if conv.host_id is None:
+        return
+    # Only respawn a conversation still pinned to the runner that died. If
+    # the binding already moved on (the runner reconnected and the row was
+    # rebound, or another path relaunched), there is nothing to do.
+    if conv.runner_id != dead_runner_id:
+        return
+    # (3c) Never resurrect an intentionally-stopped runner. Re-checked here
+    # because the Stop could have landed during the debounce wait.
+    if _runner_was_intentionally_stopped(dead_runner_id):
+        _logger.info(
+            "Session %s runner %s was intentionally stopped; no auto-respawn",
+            conv.id,
+            dead_runner_id,
+        )
+        return
+    # (3a) Host must be LIVE on THIS replica: only a replica actually
+    # holding the host tunnel can send ``host.launch_runner``. Gate on the
+    # in-memory registry, NOT the cross-replica DB liveness row.
+    host_conn = host_registry.get(conv.host_id)
+    if host_conn is None:
+        _logger.info(
+            "No live host tunnel on this replica for session %s (host %s); "
+            "leaving the manual reconnect path",
+            conv.id,
+            conv.host_id,
+        )
+        return
+    # (3d) One respawn per conversation at a time.
+    if conv.id in _auto_respawn_in_flight:
+        return
+    # (3e) Bound the retries so a host that keeps killing its runner cannot
+    # loop forever.
+    if not _auto_respawn_within_budget(conv.id):
+        _logger.warning(
+            "Auto-respawn budget exhausted for session %s (host %s keeps "
+            "dropping its runner); leaving the manual reconnect path",
+            conv.id,
+            conv.host_id,
+        )
+        return
+    _auto_respawn_in_flight.add(conv.id)
+    try:
+        _record_auto_respawn_attempt(conv.id)
+        _logger.warning(
+            "Auto-respawning host-bound runner for session %s on live host %s "
+            "(previous runner %s died)",
+            conv.id,
+            conv.host_id,
+            dead_runner_id,
+        )
+        launch_attempt = await _launch_runner_on_host(
+            conv,
+            conversation_store,
+            host_registry,
+            host_conn,
+        )
+        if launch_attempt.error_code == _HARNESS_NOT_CONFIGURED_ERROR_CODE:
+            # The host refused (harness not configured there). Do NOT loop
+            # on a deterministic refusal; leave the binding so a later
+            # manual message surfaces the setup banner via the normal path.
+            _logger.warning(
+                "Host %s refused auto-respawn for session %s: %s",
+                conv.host_id,
+                conv.id,
+                launch_attempt.error,
+            )
+            return
+        # Wait for the fresh runner's tunnel. On connect, the existing
+        # ``_on_runner_connect`` callback (server/app.py) re-POSTs
+        # ``/v1/sessions``, restarts the relay, and clears the stale
+        # ``runner_disconnected`` status — none of which is duplicated here.
+        # This wait exists only to record a definitive success/failure (so
+        # the retry budget is meaningful) and to abort early on a crash
+        # report.
+        client = await _wait_for_runner_client(
+            conv.id,
+            runner_router,
+            tunnel_registry,
+            runner_id=launch_attempt.runner_id,
+            timeout_s=_HOST_RELAUNCH_RUNNER_CONNECT_TIMEOUT_S,
+            runner_exit_reports=runner_exit_reports,
+        )
+        if client is None:
+            _logger.warning(
+                "Auto-respawned runner %s for session %s did not connect within %.0fs",
+                launch_attempt.runner_id,
+                conv.id,
+                _HOST_RELAUNCH_RUNNER_CONNECT_TIMEOUT_S,
+            )
+        else:
+            _logger.info(
+                "Auto-respawn succeeded for session %s (new runner %s)",
+                conv.id,
+                launch_attempt.runner_id,
+            )
+    finally:
+        _auto_respawn_in_flight.discard(conv.id)
 
 
 # Strong references to in-flight background managed-launch tasks.
@@ -18776,6 +19187,13 @@ def create_sessions_router(
             # only ever stop the runner bound to this session.
             stop_conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
             if stop_conv is not None and stop_conv.host_id and stop_conv.runner_id:
+                # Mark the runner as intentionally stopped BEFORE dropping
+                # its tunnel: the drop fires ``_on_runner_disconnect``
+                # indistinguishably from an unexpected death, and the
+                # auto-respawn path there must NOT resurrect a session the
+                # user just stopped. The marker is short-lived (TTL) — the
+                # disconnect follows within seconds — and consumed there.
+                mark_runner_intentionally_stopped(stop_conv.runner_id)
                 await _stop_session_host_runner(
                     session_id,
                     stop_conv.host_id,

@@ -1264,9 +1264,15 @@ def create_app(
             # slow provision doesn't outlive the ASGI shutdown (the
             # sandbox itself, if already provisioned, is reaped by the
             # provider lifetime cap — see the hook's docstring).
-            from omnigent.server.routes.sessions import cancel_managed_launch_tasks
+            from omnigent.server.routes.sessions import (
+                cancel_auto_respawn_tasks,
+                cancel_managed_launch_tasks,
+            )
 
             await cancel_managed_launch_tasks()
+            # Stop in-flight host-bound runner auto-respawns (debounce /
+            # connect waits) so they don't outlive the ASGI shutdown.
+            await cancel_auto_respawn_tasks()
             _uninstall_subagent_block_notifier()
             set_resource_registry(None)
             set_runner_ws_factory(None)
@@ -1952,6 +1958,7 @@ def create_app(
         from omnigent.server.routes.sessions import (
             _publish_status,
             _session_status_cache,
+            schedule_runner_auto_respawn,
         )
 
         # Newest-wins guard: a superseded tunnel's teardown fires this
@@ -1994,6 +2001,24 @@ def create_app(
         for session_id in affected:
             _session_status_cache[session_id] = "failed"
             _publish_status(session_id, "failed")
+
+        # Host-bound auto-respawn (issues #1857 / #1953 gap): if this dead
+        # runner backed a host-bound session whose host is still live on
+        # this replica, proactively relaunch it so the orphaned session
+        # recovers without a manual "click to reconnect". Fire-and-forget
+        # and heavily gated (host-bound only, debounced, skips
+        # intentional Stops, deduped, retry-capped) — see
+        # ``schedule_runner_auto_respawn``. A CLI / local_stranded /
+        # host-offline session finds no live host tunnel and falls through
+        # to today's manual path untouched.
+        schedule_runner_auto_respawn(
+            runner_id,
+            conversation_store=conversation_store,
+            host_registry=host_registry,
+            tunnel_registry=tunnel_registry,
+            runner_router=runner_router,
+            runner_exit_reports=runner_exit_reports,
+        )
 
     async def _on_runner_exited(runner_id: str, error: str) -> None:
         """Mark a crashed runner's session(s) failed and push the cause.
