@@ -10179,12 +10179,46 @@ async def _run_compact_locked(
         )
     loaded = agent_cache.load(agent.id, agent.bundle_location, expand_env=agent.session_id is None)
     spec = loaded.spec
+    # Summarizer model resolution order (first hit wins):
+    #   1. spec.llm                — an explicit agent-level LLM block.
+    #   2. spec.executor.model     — the executor's own model/connection.
+    #   3. get_caps().llm          — the deployment's server-level ``llm:``
+    #                                (RuntimeCaps.llm, from the server --config
+    #                                YAML). This is the fallback that lets
+    #                                omnigent-executor specs (polly and its
+    #                                sub-agents) — which pin NO spec.llm /
+    #                                executor.model, and MUST NOT, since the
+    #                                inner harness owns the agent brain — still
+    #                                compact WITHOUT carrying a summarizer model
+    #                                + secret env-ref in the bundle (which the
+    #                                runner re-parses at every sub-agent boot in
+    #                                a secret-stripped env, breaking boot).
+    #                                Resolving server-side keeps the credential
+    #                                out of all specs entirely.
+    #   otherwise                  — raise (nothing configured a summarizer).
     if spec.llm is not None:
         llm_config = spec.llm
     elif spec.executor.model is not None:
         from omnigent.spec.types import LLMConfig
 
         llm_config = LLMConfig(model=spec.executor.model, connection=spec.executor.connection)
+    elif get_caps().llm is not None:
+        from dataclasses import replace
+
+        from omnigent.spec.parser import expand_env_vars
+
+        caps_llm = get_caps().llm
+        # Expand any ${VAR} in the server-level connection HERE, in the server
+        # process (which holds the credential), mirroring how the
+        # spec.executor.connection branch above is already env-expanded before
+        # reaching the summarizer call. caps.llm is normally expanded at server
+        # startup (parse_server_llm, expand_env=True); re-expanding is an
+        # idempotent no-op for already-resolved values and a safety net if a
+        # host built caps.llm without expansion.
+        connection = (
+            expand_env_vars(caps_llm.connection) if caps_llm.connection else caps_llm.connection
+        )
+        llm_config = replace(caps_llm, connection=connection)
     else:
         raise OmnigentError(
             "Compaction requires a configured LLM model",

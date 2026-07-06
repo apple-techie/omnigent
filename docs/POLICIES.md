@@ -67,6 +67,37 @@ omnigent server --config server_config.yaml
 
 After starting, you can also add or remove policies at runtime through the REST API (see [Admin policy REST API](#admin-policy-rest-api)).
 
+### Server LLM: policy classifier and compaction summarizer
+
+The optional top-level `llm:` block in the server config (see
+[`deny_trivial_to_expensive_model`](#deny_trivial_to_expensive_model) for the
+shape) configures the deployment's server-level LLM. Beyond driving LLM-backed
+policy classifiers, it is the **fallback summarizer** for explicit `/compact`.
+
+`_run_compact_locked` resolves the summarizer model in this order (first hit
+wins):
+
+1. `spec.llm` — an explicit agent-level `llm:` block.
+2. `spec.executor.model` (+ `spec.executor.connection`) — the executor's model.
+3. `llm:` from the server config (`RuntimeCaps.llm`) — this fallback.
+4. Otherwise: `/compact` returns *"Compaction requires a configured LLM model"*.
+
+The fallback lets `omnigent`-executor agents (e.g. `polly` and its sub-agents),
+which intentionally pin **no** `spec.llm` / `executor.model` — the inner
+harness owns the agent brain — still compact, without any agent bundle
+carrying a summarizer model or a secret connection. Any `${VAR}` in the server
+`llm.connection` is expanded **server-side only**, where the credential lives,
+so the secret never enters a spec that the runner re-parses at worker boot.
+
+```yaml
+# server_config.yaml — one llm: block serves both policy LLM and /compact
+llm:
+  model: openai/gpt-5.4-mini
+  connection:
+    base_url: https://openai.example.com/v1
+    api_key: ${DEPLOYMENT_LLM_API_KEY}   # expanded in the server process only
+```
+
 ---
 
 ## For agent developers
