@@ -46,9 +46,10 @@ _WAKE_RETRIES = 2
 _WAKE_RETRY_BACKOFF_S = 0.5
 
 # How long a block may sit unanswered before the parent agent is woken.
-# The approval card is already mirrored into the parent chat, so an
-# attended session resolves silently; the wake is the unattended fallback.
-_BLOCK_WAKE_ESCALATION_DELAY_S = 120.0
+# Keep this immediate: a blocked child is a durable parent-visible state, not
+# a terminal-only event. Delaying this wake makes the parent look silently idle
+# to turn-level watchdogs while it is legitimately waiting on human action.
+_BLOCK_WAKE_ESCALATION_DELAY_S = 0.0
 
 # Injected delivery: post ``notice`` to the parent and wake it. Returns True when
 # the wake was confirmed delivered, False when it could not be (no runner bound /
@@ -237,10 +238,10 @@ class SubagentBlockNotifier:
         Escalate one unanswered block to the parent, then close the loop.
 
         The approval prompt is mirrored into ancestor chats the moment it
-        publishes, so the human's surface is immediate; this handler waits
-        out ``_BLOCK_WAKE_ESCALATION_DELAY_S`` and only wakes the parent
-        *agent* if the block is still unanswered (the debounce arm doubles
-        as the cancellation token — :meth:`observe` clears it on resolve).
+        publishes, and this handler immediately wakes the parent *agent*
+        with a durable notice if the block is still unanswered (the debounce
+        arm doubles as the cancellation token — :meth:`observe` clears it on
+        resolve).
         For a top-level session (no parent) this is a no-op.
 
         Delivery is attempted up to ``1 + _WAKE_RETRIES`` times (the parent's
