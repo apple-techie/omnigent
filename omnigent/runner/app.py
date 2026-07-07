@@ -17,6 +17,7 @@ import mimetypes
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -1091,6 +1092,7 @@ async def _auto_create_opencode_terminal(
     # provider config the ambient env/global config already gives it.
     from omnigent.opencode_native_bridge import xdg_config_home_for_bridge_dir
     from omnigent.opencode_native_provider import (
+        OpenCodeGatewayResolution,
         build_opencode_mcp_block,
         build_opencode_model_default_config,
         build_opencode_omnigent_mcp_server,
@@ -1112,7 +1114,44 @@ async def _auto_create_opencode_terminal(
         model_override = gateway.qualified_model
         config = dict(build_opencode_provider_config(gateway))
         config["model"] = model_override
-    elif model_override:
+    elif model_override and (
+        "/" not in model_override or model_override.startswith("omnigent-gateway/")
+    ):
+        try:
+            from omnigent.model_catalog import resolve_model_provider
+
+            provider = resolve_model_provider(agent_spec, "opencode-native")
+            gateway_model_id = (
+                model_override.split("/", 1)[1]
+                if model_override.startswith("omnigent-gateway/")
+                else model_override
+            )
+            token = provider.api_key
+            if not token and provider.auth_command:
+                from omnigent._platform import default_shell_argv
+
+                result = subprocess.run(
+                    default_shell_argv(provider.auth_command),
+                    capture_output=True,
+                    text=True,
+                    timeout=15.0,
+                    check=True,
+                )
+                token = result.stdout.strip()
+            if provider.base_url and token:
+                gateway = OpenCodeGatewayResolution(
+                    base_url=provider.base_url,
+                    api_key=token,
+                    model_id=gateway_model_id,
+                    provider_id="omnigent-gateway",
+                    provider_name="Omnigent Gateway",
+                )
+                model_override = gateway.qualified_model
+                config = dict(build_opencode_provider_config(gateway))
+                config["model"] = model_override
+        except Exception:  # noqa: BLE001 - provider synthesis is best effort.
+            _logger.info("opencode gateway provider synthesis failed", exc_info=True)
+    if not config and model_override:
         # No custom provider, but a model is pinned (``omni opencode --model`` or
         # the ``omni setup`` OpenCode default): write opencode's default model so
         # the native TUI and the first turn use it instead of ``opencode/big-pickle``.

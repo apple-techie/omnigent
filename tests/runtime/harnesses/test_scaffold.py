@@ -365,6 +365,14 @@ def use_wedged_fast_heartbeat(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
+def use_slow_tool_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Spawn a tool-dispatch harness whose result arrives after the idle window."""
+    monkeypatch.setenv("HARNESS_TEST_FIXTURE", "slow_tool_dispatch")
+    monkeypatch.setenv("HARNESS_TURN_TIMEOUT_S", "2")
+    monkeypatch.setenv("HARNESS_TOOL_DISPATCH_PROGRESS_INTERVAL_S", "0.5")
+
+
+@pytest.fixture
 def use_busy_absolute_cap(monkeypatch: pytest.MonkeyPatch) -> None:
     """Busy harness, 2s absolute ceiling below its ~3s runtime; idle high so only the cap fires."""
     monkeypatch.setenv("HARNESS_TEST_FIXTURE", "busy_progress")
@@ -722,6 +730,61 @@ async def test_per_turn_watchdog_ignores_heartbeats(
     assert error is not None and "watchdog" in error["message"], (
         f"Watchdog failure must carry an explanatory error message; got {error!r}."
     )
+
+
+async def test_tool_dispatch_wait_progress_resets_idle_watchdog(
+    use_slow_tool_dispatch: None,
+    manager: HarnessProcessManager,
+) -> None:
+    """
+    A turn parked on a known tool dispatch must outlive the idle window.
+
+    This pins OpenAI Agents SDK parent turns that wait on long-running
+    ``sys_session_send``/inbox handoffs: the harness has already emitted an
+    action-required tool call and is legitimately waiting for a result, so it
+    should not be marked as a wedged LLM just because the child takes longer
+    than the idle watchdog window.
+    """
+    conv_id = "conv_slow_tool_dispatch"
+    stream_client = await manager.get_client(conv_id, _TEST_HARNESS_NAME)
+    side_client = _make_side_client(str(manager.socket_path(conv_id)))
+    body = {"type": "message", "role": "user", "model": "test-agent", "content": []}
+    events: list[_ParsedSSEEvent] = []
+    try:
+        async with asyncio.timeout(20):
+            async with stream_client.stream(
+                "POST",
+                f"/v1/sessions/{conv_id}/events",
+                json=body,
+            ) as response:
+                patched = False
+                async for event in _stream_iter(response):
+                    events.append(event)
+                    if (
+                        not patched
+                        and event.event == "response.output_item.done"
+                        and event.data["item"].get("status") == "action_required"
+                    ):
+                        await asyncio.sleep(3)
+                        patch_resp = await side_client.post(
+                            f"/v1/sessions/{conv_id}/events",
+                            json={
+                                "type": "tool_result",
+                                "call_id": "call_slow_tool_1",
+                                "output": "ok",
+                            },
+                        )
+                        assert patch_resp.status_code == 204
+                        patched = True
+
+        event_types = [e.event for e in events]
+        assert "response.failed" not in event_types
+        assert event_types[-1] == "response.completed"
+        assert event_types.count("response.in_progress") >= 2
+        deltas = [e.data["delta"] for e in events if e.event == "response.output_text.delta"]
+        assert any("got:ok" in d for d in deltas)
+    finally:
+        await side_client.aclose()
 
 
 async def test_per_turn_absolute_watchdog_caps_runaway_active_turn(

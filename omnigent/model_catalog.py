@@ -143,6 +143,10 @@ _KEY_AUTH_FAMILY: dict[str, str] = {
 # Multi-family providers (pi): anthropic first, matching _apply_provider_to_pi.
 _FAMILY_PREFERENCE = (ANTHROPIC_FAMILY, OPENAI_FAMILY)
 
+# Provider id synthesized by ``runner.app`` for opencode-native sessions that
+# route through an OpenAI-compatible Omnigent/CPA gateway.
+_OPENCODE_GATEWAY_PROVIDER_ID = "omnigent-gateway"
+
 
 @dataclass(frozen=True)
 class ModelEntry:
@@ -606,7 +610,28 @@ def list_models_for_worker(
     if harness is None:
         return listing
     filtered = tuple(m for m in listing.models if model_family_mismatch(harness, m.id) is None)
+    if harness in ("opencode", "opencode-native", "native-opencode"):
+        filtered = tuple(_opencode_model_entry(provider, m) for m in filtered)
     return replace(listing, models=filtered)
+
+
+def _opencode_model_entry(
+    provider: ResolvedModelProvider,
+    entry: ModelEntry,
+) -> ModelEntry:
+    """Return the model id shape opencode-native can actually launch.
+
+    OpenCode requires ``provider/model`` ids unless the model belongs to one
+    of its own globally configured providers. Omnigent synthesizes an
+    ``omnigent-gateway`` provider for OpenAI-compatible gateway credentials,
+    so the catalog must advertise that qualified shape instead of raw CPA ids
+    like ``gemini-pro-agent``.
+    """
+    if "/" in entry.id:
+        return entry
+    if provider.kind in {KEY_KIND, "gateway", "local"} and provider.base_url:
+        return replace(entry, id=f"{_OPENCODE_GATEWAY_PROVIDER_ID}/{entry.id}")
+    return entry
 
 
 def catalog_for_spec(

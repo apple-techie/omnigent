@@ -99,6 +99,26 @@ class _ToolDispatchHarness(HarnessApp):
         ctx.emit(OutputTextDeltaEvent(type="response.output_text.delta", delta=f"got:{result}"))
 
 
+class _SlowToolDispatchHarness(HarnessApp):
+    """
+    Parks on a tool result longer than the idle watchdog.
+
+    This reproduces OpenAI Agents SDK parent turns waiting on long
+    ``sys_session_send``/tool dispatches: the turn is healthy, but no model text
+    arrives until the tool result is posted.
+    """
+
+    async def run_turn(self, request: CreateResponseRequest, ctx: TurnContext) -> None:
+        del request
+        result = await ctx.dispatch_tool(
+            call_id="call_slow_tool_1",
+            name="slow_tool",
+            arguments='{"x": 1}',
+            agent="test-agent",
+        )
+        ctx.emit(OutputTextDeltaEvent(type="response.output_text.delta", delta=f"got:{result}"))
+
+
 class _ElicitationHarness(HarnessApp):
     """
     Emits an elicitation request, parks on the event-delivered
@@ -432,6 +452,7 @@ _FIXTURES: dict[str, type[HarnessApp]] = {
     "wedged_fast_heartbeat": _WedgedFastHeartbeatHarness,
     "usage": _UsageHarness,
     "tool_dispatch": _ToolDispatchHarness,
+    "slow_tool_dispatch": _SlowToolDispatchHarness,
     "elicitation": _ElicitationHarness,
     "cancellable": _CancellableHarness,
     "injection": _InjectionHarness,

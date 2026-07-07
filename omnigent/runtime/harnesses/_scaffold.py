@@ -81,6 +81,9 @@ _logger = logging.getLogger(__name__)
 # dead-detection threshold for AP, long enough that the
 # per-process emit overhead is negligible.
 _HEARTBEAT_INTERVAL_S = 15.0
+_TOOL_DISPATCH_PROGRESS_INTERVAL_S = float(
+    os.environ.get("HARNESS_TOOL_DISPATCH_PROGRESS_INTERVAL_S", "60")
+)
 
 # Grace period between SIGTERM / SIGINT arrival and the FastAPI
 # app exiting. Long enough to let a well-behaved harness flush
@@ -490,6 +493,12 @@ class TurnContext:
             "agent": agent,
         }
         self.emit(OutputItemDoneEvent(type="response.output_item.done", item=item))
+        progress_task: asyncio.Task[None] | None = None
+        if _TOOL_DISPATCH_PROGRESS_INTERVAL_S > 0:
+            progress_task = asyncio.create_task(
+                self._tool_dispatch_progress_loop(agent),
+                name=f"harness-tool-dispatch-progress:{call_id}",
+            )
         try:
             result = await future
             item["status"] = "completed"
@@ -509,10 +518,39 @@ class TurnContext:
             )
             return result
         finally:
+            if progress_task is not None:
+                progress_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await progress_task
             # Always remove — whether the Future resolved cleanly
             # or was cancelled, holding it in the dict would
             # leak memory across turns.
             self._pending_tool_calls.pop(call_id, None)
+
+    async def _tool_dispatch_progress_loop(self, model: str) -> None:
+        """
+        Emit real progress while ``dispatch_tool`` is parked on a tool result.
+
+        Tool dispatches can represent long-running but healthy work, notably
+        ``sys_session_send`` fanout where child sessions finish later and wake
+        the parent via inbox. A bare heartbeat is intentionally not progress and
+        must not reset the idle watchdog, but a harness parked on a known
+        outstanding tool Future is not wedged. Refreshing ``response.in_progress``
+        keeps that parent turn alive without polluting conversation history.
+        """
+        while True:
+            await asyncio.sleep(_TOOL_DISPATCH_PROGRESS_INTERVAL_S)
+            self.emit(
+                InProgressEvent(
+                    type="response.in_progress",
+                    response=ResponseObject(
+                        id=self.response_id,
+                        status="in_progress",
+                        model=model,
+                        created_at=int(time.time()),
+                    ),
+                )
+            )
 
     async def elicit(
         self, elicitation_id: str, params: ElicitationRequestParams

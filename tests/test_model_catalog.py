@@ -718,6 +718,58 @@ def test_openai_compatible_listing_maps_ids_and_context_window(
     assert [(m.id, m.context_window) for m in listing.models] == [("openai/gpt-5.4", 400000)]
 
 
+def test_opencode_gateway_listing_advertises_qualified_model_ids(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """OpenCode gets provider/model ids while Hermes keeps raw gateway ids.
+
+    CPA/OpenAI-compatible gateways can advertise raw ids like
+    ``gemini-pro-agent``. Hermes can launch those directly from its generated
+    config, but OpenCode requires a ``provider/model`` id for synthesized
+    providers. If ``sys_advise_models`` sees the raw id for OpenCode, it can
+    recommend a model OpenCode cannot launch.
+    """
+    monkeypatch.setenv("CPA_KEY", "sk-cpa-test")
+    _isolate_config(
+        monkeypatch,
+        tmp_path,
+        "providers:\n"
+        "  cpa:\n"
+        "    kind: gateway\n"
+        "    default: true\n"
+        "    openai:\n"
+        "      base_url: https://openai.kainotomic.com/v1\n"
+        "      api_key: $CPA_KEY\n"
+        "      wire_api: responses\n",
+    )
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        """Serve a CPA-style model list with a raw Gemini agent model."""
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"id": "gemini-pro-agent"},
+                    {"id": "gpt-5.5", "context_length": 1000000},
+                ]
+            },
+        )
+
+    transport = httpx.MockTransport(_handler)
+    opencode = list_models_for_worker(
+        _worker_spec("opencode-native"), "opencode-native", transport=transport
+    )
+    hermes = list_models_for_worker(
+        _worker_spec("hermes-native"), "hermes-native", transport=transport
+    )
+
+    assert [m.id for m in opencode.models] == [
+        "omnigent-gateway/gemini-pro-agent",
+        "omnigent-gateway/gpt-5.5",
+    ]
+    assert [m.id for m in hermes.models] == ["gemini-pro-agent", "gpt-5.5"]
+
+
 def test_anthropic_api_listing_uses_api_key_headers(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
