@@ -13087,8 +13087,10 @@ async def _handle_advise_models_mcp(
                 )
 
     _WORKER_HARNESS: dict[str, str] = {
-        "claude_code": "claude-sdk",
-        "codex": "codex",
+        "claude_code": "claude-native",
+        "codex": "codex-native",
+        "opencode": "opencode-native",
+        "hermes": "hermes-native",
         "pi": "pi",
     }
 
@@ -13134,14 +13136,18 @@ async def _handle_advise_models_mcp(
                 candidates = explicit_models
             else:
                 harness_key = _resolve_harness_for_worker(agent) or agent
-                # Prefer live runner catalog (worker name or harness key);
-                # fall back to static infer_models table.
-                candidates = (
-                    (_runner_catalog or {}).get(agent)
-                    or (_runner_catalog or {}).get(harness_key)
-                    or infer_models(harness_key)
-                    or []
-                )
+                if _runner_catalog is not None:
+                    # The live runner catalog is authoritative. If a worker is
+                    # absent from it, do not invent an args.model from the stale
+                    # static table; let the dispatcher use that worker's default
+                    # or surface no recommendation.
+                    candidates = (
+                        _runner_catalog.get(agent)
+                        or _runner_catalog.get(harness_key)
+                        or []
+                    )
+                else:
+                    candidates = infer_models(harness_key) or []
             if candidates:
                 harness_models.setdefault(harness_key, [])
                 harness_to_agent.setdefault(harness_key, agent)

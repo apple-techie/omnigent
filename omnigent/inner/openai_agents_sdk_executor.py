@@ -63,6 +63,7 @@ _DATABRICKS_OPENAI_AGENTS_DEFAULT_MODEL = "databricks-gpt-5-5"
 # risk wedging long e2e turns under the shard timeout, and the
 # transient is rare.
 _EMPTY_TURN_MAX_ATTEMPTS = 2
+_SDK_SESSION_GET_ITEMS_TIMEOUT = 5.0
 
 # SDK ``RunItem.type`` values that are bookkeeping, not user-visible
 # output. A turn whose only new items are these (and which produced no
@@ -1109,7 +1110,7 @@ class OpenAIAgentsSDKExecutor(Executor):
         return "default"
 
     def _get_or_create_session_state(
-        self, agents_sdk: _AgentsSDK, session_key: str
+        self, agents_sdk: _AgentsSDK, session_key: str, model: str
     ) -> _AgentsSessionState:
         state = self._session_states.get(session_key)
         if state is not None:
@@ -1148,6 +1149,7 @@ class OpenAIAgentsSDKExecutor(Executor):
                     session_id=session_key,
                     underlying_session=underlying,  # type: ignore[arg-type]
                     client=self._client,
+                    model=model,
                 )
             except (ImportError, AttributeError, ValueError) as exc:
                 logger.debug(
@@ -1214,10 +1216,38 @@ class OpenAIAgentsSDKExecutor(Executor):
         state: _AgentsSessionState,
         target_item_count: int,
     ) -> None:
-        items = await state.sdk_session.get_items()
+        items = await self._read_sdk_session_items(state, purpose="rewind")
+        if items is None:
+            return
         while len(items) > target_item_count:
             await state.sdk_session.pop_item()
-            items = await state.sdk_session.get_items()
+            items = await self._read_sdk_session_items(state, purpose="rewind")
+            if items is None:
+                return
+
+    async def _read_sdk_session_items(
+        self,
+        state: _AgentsSessionState,
+        *,
+        purpose: str,
+    ) -> list[dict[str, Any]] | None:
+        try:
+            return await asyncio.wait_for(
+                state.sdk_session.get_items(),
+                timeout=_SDK_SESSION_GET_ITEMS_TIMEOUT,
+            )
+        except TimeoutError:
+            logger.warning(
+                "Timed out reading SDK session items during %s; continuing without export",
+                purpose,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "Failed to read SDK session items during %s",
+                purpose,
+                exc_info=True,
+            )
+        return None
 
     async def _prepare_sdk_session_for_turn(
         self,
@@ -1461,7 +1491,7 @@ class OpenAIAgentsSDKExecutor(Executor):
             yield ExecutorError(message=str(exc), retryable=False)
             return
 
-        state = self._get_or_create_session_state(agents_sdk, session_key)
+        state = self._get_or_create_session_state(agents_sdk, session_key, model)
         state.interrupt_requested = False
         await self._prepare_sdk_session_for_turn(state, messages)
         stepwise_internal_turns = bool(cfg.extra.get("stepwise_internal_turns"))
@@ -1489,7 +1519,8 @@ class OpenAIAgentsSDKExecutor(Executor):
             reasoning_effort=reasoning_effort,
             max_tokens=max_tokens,
         )
-        current_item_count = len(await state.sdk_session.get_items())
+        current_items = await self._read_sdk_session_items(state, purpose="pre-turn count")
+        current_item_count = len(current_items or [])
         run_config = agents_sdk.RunConfig(
             model=model,
             model_provider=provider,
@@ -1837,13 +1868,10 @@ class OpenAIAgentsSDKExecutor(Executor):
                     if turn_usage is not None:
                         _compaction_tokens = turn_usage.get("context_tokens", 0) or 0
                     _compacted: list[dict[str, Any]] | None = None
-                    try:
-                        _compacted = await state.sdk_session.get_items()
-                    except Exception:  # noqa: BLE001
-                        logger.warning(
-                            "Failed to read compacted session items",
-                            exc_info=True,
-                        )
+                    _compacted = await self._read_sdk_session_items(
+                        state,
+                        purpose="compaction export",
+                    )
                     yield CompactionComplete(
                         summary=(
                             "[OpenAI Responses API compaction"

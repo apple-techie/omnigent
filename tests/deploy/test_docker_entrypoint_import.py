@@ -153,3 +153,171 @@ def test_select_artifact_store(
         port=8000,
     )
     assert isinstance(_select_artifact_store(resolved), expected_type)
+
+
+def test_build_runtime_caps_loads_docker_llm_policies_and_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deploy.docker.entrypoint import _build_runtime_caps
+
+    monkeypatch.delenv("OMNIGENT_SMART_ROUTING", raising=False)
+
+    caps = _build_runtime_caps(
+        {
+            "execution_timeout": 123,
+            "llm": {
+                "model": "openai/gpt-5.5",
+                "connection": {
+                    "base_url": "https://openai.example.test/v1",
+                    "api_key": "test-key",
+                },
+                "request_timeout": 45,
+            },
+            "policies": {
+                "audit": {
+                    "type": "function",
+                    "on": ["request"],
+                    "function": "example.policies.audit",
+                },
+            },
+        }
+    )
+
+    assert caps.execution_timeout == 123
+    assert caps.llm is not None
+    assert caps.llm.model == "openai/gpt-5.5"
+    assert caps.llm.connection == {
+        "base_url": "https://openai.example.test/v1",
+        "api_key": "test-key",
+    }
+    assert caps.llm.request_timeout == 45
+    assert [policy.name for policy in caps.default_policies] == ["audit"]
+    assert caps.routing_client is None
+
+
+def test_build_runtime_caps_enables_smart_routing_when_requested(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deploy.docker.entrypoint import _build_runtime_caps
+    from omnigent.server.smart_routing import LLMRoutingClient
+
+    monkeypatch.setenv("OMNIGENT_SMART_ROUTING", "1")
+
+    caps = _build_runtime_caps(
+        {
+            "llm": {
+                "model": "openai/gpt-5.5",
+                "connection": {
+                    "base_url": "https://openai.example.test/v1",
+                    "api_key": "test-key",
+                },
+            },
+        }
+    )
+
+    assert caps.llm is not None
+    assert caps.llm.model == "openai/gpt-5.5"
+    assert isinstance(caps.routing_client, LLMRoutingClient)
+
+
+def test_build_runtime_caps_smart_routing_without_llm_is_noop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deploy.docker.entrypoint import _build_runtime_caps
+
+    monkeypatch.setenv("OMNIGENT_SMART_ROUTING", "1")
+
+    caps = _build_runtime_caps({})
+
+    assert caps.llm is None
+    assert caps.routing_client is None
+
+
+def test_startup_agent_paths_merge_config_and_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deploy.docker.entrypoint import _startup_agent_paths
+
+    agent_a = tmp_path / "agent-a"
+    agent_b = tmp_path / "agent-b"
+    monkeypatch.setenv("OMNIGENT_STARTUP_AGENTS", f"{agent_b},{agent_a}")
+
+    paths = _startup_agent_paths({"startup_agents": [str(agent_a)]})
+
+    assert paths == [agent_a, agent_b]
+
+
+def test_build_app_passes_configured_runtime_caps(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deploy.docker import entrypoint
+
+    class _DummyStore:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+    class _DummyAgentCache:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+    captured: dict[str, object] = {}
+
+    def _fake_init_runtime(**kwargs: object) -> None:
+        captured["caps"] = kwargs["caps"]
+
+    monkeypatch.setattr("omnigent.runtime.init", _fake_init_runtime)
+    monkeypatch.setattr("omnigent.runtime.telemetry.init", lambda *args, **kwargs: None)
+    monkeypatch.setattr("omnigent.runtime.agent_cache.AgentCache", _DummyAgentCache)
+    monkeypatch.setattr(
+        "omnigent.stores.agent_store.sqlalchemy_store.SqlAlchemyAgentStore", _DummyStore
+    )
+    monkeypatch.setattr(
+        "omnigent.stores.file_store.sqlalchemy_store.SqlAlchemyFileStore", _DummyStore
+    )
+    monkeypatch.setattr(
+        "omnigent.stores.conversation_store.sqlalchemy_store.SqlAlchemyConversationStore",
+        _DummyStore,
+    )
+    monkeypatch.setattr(
+        "omnigent.stores.comment_store.sqlalchemy_store.SqlAlchemyCommentStore",
+        _DummyStore,
+    )
+    monkeypatch.setattr(
+        "omnigent.stores.permission_store.sqlalchemy_store.SqlAlchemyPermissionStore",
+        _DummyStore,
+    )
+    monkeypatch.setattr("omnigent.stores.host_store.HostStore", _DummyStore)
+    monkeypatch.setattr(entrypoint, "_select_artifact_store", lambda _resolved: object())
+    monkeypatch.setattr("omnigent.server.auth.create_auth_provider", lambda: object())
+    monkeypatch.setattr(
+        "omnigent.server.app.create_app",
+        lambda **kwargs: {"created": True, "kwargs": kwargs},
+    )
+
+    resolved = entrypoint._ResolvedConfig(
+        cfg={
+            "execution_timeout": 456,
+            "llm": {
+                "model": "openai/gpt-5.5",
+                "connection": {
+                    "base_url": "https://openai.example.test/v1",
+                    "api_key": "test-key",
+                },
+            },
+        },
+        database_url="postgresql+psycopg://u:p@localhost/omnigent",
+        artifact_dir=tmp_path,
+        artifact_store_uri=None,
+        host="0.0.0.0",
+        port=8000,
+    )
+
+    built = entrypoint.build_app(resolved)
+
+    assert built.app["created"] is True
+    caps = captured["caps"]
+    assert caps.execution_timeout == 456
+    assert caps.llm is not None
+    assert caps.llm.model == "openai/gpt-5.5"

@@ -875,7 +875,7 @@ class TestOpenAIAgentsSDKExecutor(unittest.TestCase):
                 ]
                 self.assertEqual(first_events[-1].response, "one")
 
-                state = executor._get_or_create_session_state(_fake_agents_sdk(), "s1")
+                state = executor._get_or_create_session_state(_fake_agents_sdk(), "s1", "gpt-5")
                 # After the first turn, the cursor should be past the user and
                 # the assistant response (2 persisted items in context terms).
                 self.assertEqual(state.history_cursor, 2)
@@ -1095,7 +1095,7 @@ class TestOpenAIAgentsSDKExecutor(unittest.TestCase):
 
         async def _t():
             executor = OpenAIAgentsSDKExecutor(client=object())
-            state = executor._get_or_create_session_state(_fake_agents_sdk(), "s1")
+            state = executor._get_or_create_session_state(_fake_agents_sdk(), "s1", "gpt-5")
             state.active_result = _FakeResult(events=[])
             # Set to a non-zero value so the rollback-target
             # assertion below verifies a real assignment, not
@@ -2880,6 +2880,82 @@ class _FakeCompactionItem:
     """Stand-in for agents.items.CompactionItem."""
 
     type: str = "compaction_item"
+
+
+class _HttpClient:
+    base_url = "https://openai.example.test/v1"
+
+
+def test_compaction_session_uses_turn_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _t():
+        created: dict[str, object] = {}
+
+        class _FakeCompactionSession:
+            def __init__(self, **kwargs: object) -> None:
+                created.update(kwargs)
+
+            async def get_items(self):
+                return []
+
+        fake_memory = types.ModuleType("agents.memory")
+        fake_memory.OpenAIResponsesCompactionSession = _FakeCompactionSession
+        monkeypatch.setitem(sys.modules, "agents.memory", fake_memory)
+
+        executor = OpenAIAgentsSDKExecutor(client=_HttpClient(), model="gpt-5.5")
+        state = executor._get_or_create_session_state(_fake_agents_sdk(), "s1", "gpt-5.5")
+
+        assert state.sdk_session is not None
+        assert created["model"] == "gpt-5.5"
+
+    _run(_t())
+
+
+def test_compaction_get_items_timeout_does_not_block_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from omnigent.inner import openai_agents_sdk_executor as executor_module
+    from omnigent.inner.executor import CompactionComplete
+
+    async def _t():
+        class _HangingCompactionSession:
+            def __init__(self, **kwargs: object) -> None:
+                pass
+
+            async def get_items(self):
+                await asyncio.sleep(30)
+
+        fake_memory = types.ModuleType("agents.memory")
+        fake_memory.OpenAIResponsesCompactionSession = _HangingCompactionSession
+        monkeypatch.setitem(sys.modules, "agents.memory", fake_memory)
+        monkeypatch.setattr(executor_module, "_SDK_SESSION_GET_ITEMS_TIMEOUT", 0.05)
+        _FakeRunner.last_calls = []
+        _FakeRunner.next_result = _FakeResult(
+            events=[],
+            final_output="compacted",
+            new_items=[_FakeCompactionItem()],
+        )
+        executor = OpenAIAgentsSDKExecutor(client=_HttpClient(), model="gpt-5.5")
+        with patch(
+            "omnigent.inner.openai_agents_sdk_executor._ensure_agents_sdk",
+            return_value=_fake_agents_sdk(),
+        ):
+            events = await asyncio.wait_for(
+                _collect(
+                    executor.run_turn(
+                        [{"role": "user", "content": "hi", "session_id": "s1"}],
+                        [],
+                        "Be helpful.",
+                    )
+                ),
+                timeout=7,
+            )
+
+        compaction_events = [e for e in events if isinstance(e, CompactionComplete)]
+        assert len(compaction_events) == 1
+        assert compaction_events[0].compacted_messages is None
+        assert isinstance(events[-1], TurnComplete)
+
+    _run(_t())
 
 
 def test_compaction_item_emits_compaction_complete() -> None:

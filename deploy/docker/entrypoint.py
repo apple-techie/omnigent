@@ -254,6 +254,87 @@ def _select_artifact_store(resolved_config: _ResolvedConfig) -> ArtifactStore:
     return LocalArtifactStore(str(resolved_config.artifact_dir))
 
 
+def _build_runtime_caps(cfg: dict[str, Any]):
+    """Build server runtime caps from the Docker config file."""
+    from omnigent.runtime.caps import RuntimeCaps
+    from omnigent.spec import parse_default_policies, parse_server_llm
+
+    server_llm = parse_server_llm(cfg.get("llm"))
+
+    routing_client = None
+    if server_llm is not None and os.environ.get("OMNIGENT_SMART_ROUTING") == "1":
+        from omnigent.runtime.policies.builder import (
+            _build_policy_llm_client,
+            _resolve_server_llm_connection,
+        )
+
+        connection = _resolve_server_llm_connection(server_llm)
+        policy_client = _build_policy_llm_client(server_llm, connection)
+        if policy_client is not None:
+            from omnigent.server.smart_routing import LLMRoutingClient
+
+            routing_client = LLMRoutingClient(policy_client)
+
+    effective_timeout = cfg.get("execution_timeout") or 7200
+    return RuntimeCaps(
+        execution_timeout=int(effective_timeout),
+        default_policies=parse_default_policies(cfg.get("policies")),
+        llm=server_llm,
+        routing_client=routing_client,
+    )
+
+
+def _startup_agent_paths(cfg: dict[str, Any]) -> list[Path]:
+    raw: list[Any] = []
+    configured = cfg.get("startup_agents")
+    if isinstance(configured, list):
+        raw.extend(configured)
+    elif isinstance(configured, str):
+        raw.extend(part.strip() for part in configured.split(","))
+
+    env_value = os.environ.get("OMNIGENT_STARTUP_AGENTS", "")
+    if env_value:
+        raw.extend(part.strip() for part in env_value.split(","))
+
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not item:
+            continue
+        path = Path(str(item)).expanduser()
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            paths.append(path)
+    return paths
+
+
+def _register_startup_agents(
+    cfg: dict[str, Any],
+    *,
+    agent_store: Any,
+    artifact_store: ArtifactStore,
+    agent_cache: Any,
+) -> None:
+    """Register configured startup agent directories into the agent store."""
+    agent_paths = _startup_agent_paths(cfg)
+    if not agent_paths:
+        return
+
+    from omnigent.cli import _preregister_agent
+
+    for agent_path in agent_paths:
+        if not agent_path.exists():
+            raise RuntimeError(f"startup agent path does not exist: {agent_path}")
+        agent_id = _preregister_agent(
+            agent_path,
+            agent_store,
+            artifact_store,
+            agent_cache,
+        )
+        logger.info("startup agent registered: path=%s agent_id=%s", agent_path, agent_id)
+
+
 def build_app(resolved_config: _ResolvedConfig | None = None) -> _BuiltApp:
     """Resolve config if needed, wire the stores, and build the app.
 
@@ -275,7 +356,6 @@ def build_app(resolved_config: _ResolvedConfig | None = None) -> _BuiltApp:
     from omnigent.runtime import init as init_runtime
     from omnigent.runtime import telemetry
     from omnigent.runtime.agent_cache import AgentCache
-    from omnigent.runtime.caps import RuntimeCaps
     from omnigent.server.managed_hosts import parse_sandbox_config
     from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
     from omnigent.stores.comment_store.sqlalchemy_store import (
@@ -311,12 +391,18 @@ def build_app(resolved_config: _ResolvedConfig | None = None) -> _BuiltApp:
 
     init_runtime(
         agent_cache=agent_cache,
-        caps=RuntimeCaps(),
+        caps=_build_runtime_caps(cfg),
         agent_store=agent_store,
         file_store=file_store,
         conversation_store=conversation_store,
         artifact_store=artifact_store,
         comment_store=comment_store,
+    )
+    _register_startup_agents(
+        cfg,
+        agent_store=agent_store,
+        artifact_store=artifact_store,
+        agent_cache=agent_cache,
     )
 
     # Build the auth provider from the live env (header/oidc/accounts).

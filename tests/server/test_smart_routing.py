@@ -7,6 +7,7 @@ LLMRoutingClient, and the public ``route_turn`` entry point.
 from __future__ import annotations
 
 import json
+import types
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -88,6 +89,9 @@ def test_infer_models_claude_sdk() -> None:
 def test_infer_models_native_harnesses() -> None:
     assert infer_models("claude-native") is not None
     assert infer_models("codex-native") is not None
+    assert infer_models("opencode-native") is not None
+    assert infer_models("hermes-native") is not None
+    assert infer_models("pi-native") is not None
 
 
 def test_infer_models_codex() -> None:
@@ -112,6 +116,68 @@ def test_infer_models_unknown_harness() -> None:
     assert infer_models("cursor") is None
     assert infer_models("antigravity") is None
     assert infer_models(None) is None
+
+
+@pytest.mark.asyncio
+async def test_advise_models_uses_live_catalog_as_authoritative(monkeypatch: pytest.MonkeyPatch):
+    from omnigent.runtime.caps import RuntimeCaps
+    from omnigent.server.routes import sessions
+
+    class _Router:
+        calls: list[dict[str, list[str]]] = []
+
+        async def route(
+            self, message: str, available_models: dict[str, list[str]]
+        ) -> RoutingResult | None:
+            del message
+            self.calls.append(available_models)
+            return RoutingResult(
+                harness="codex-native",
+                model="live-codex-model",
+                rationale="live catalog",
+            )
+
+    router = _Router()
+    monkeypatch.setattr(sessions, "get_caps", lambda: RuntimeCaps(routing_client=router))
+    monkeypatch.setattr(
+        sessions,
+        "_get_runner_client",
+        AsyncMock(return_value=object()),
+    )
+    monkeypatch.setattr(
+        "omnigent.server.smart_routing.fetch_runner_models",
+        AsyncMock(return_value={"codex": ["live-codex-model"]}),
+    )
+    conv = types.SimpleNamespace(agent_id=None)
+
+    response = await sessions._handle_advise_models_mcp(
+        1,
+        conv,
+        {
+            "tasks": [
+                {
+                    "title": "route",
+                    "task": "pick a model",
+                    "agents": [{"agent": "codex"}, {"agent": "hermes"}],
+                }
+            ]
+        },
+        agent_store=object(),
+        session_id="conv_1",
+        runner_router=object(),
+    )
+
+    body = json.loads(response.body.decode("utf-8"))
+    payload = json.loads(body["result"]["content"][0]["text"])
+    assert router.calls == [{"codex-native": ["live-codex-model"]}]
+    assert payload["recommendations"] == [
+        {
+            "title": "route",
+            "agent": "codex",
+            "model": "live-codex-model",
+            "rationale": "live catalog",
+        }
+    ]
 
 
 # ── _build_rubric ───────────────────────────────────────────────────
