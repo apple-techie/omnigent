@@ -582,6 +582,26 @@ describe("BlockRenderer inline file-path linkification", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("does not probe host-qualified inline paths", async () => {
+    // Terminal transcripts often include paths prefixed with a machine name.
+    // They are useful prose, but not workspace-relative FileViewer targets.
+    const openFile = vi.fn();
+    renderMessage(
+      "Look at `mac-studio:~/.cloudflared/config.yml` and `ubuntu-root:/srv/app/dist/index.js`.",
+      {
+        openFile,
+        isChangedPath: () => false,
+        conversationId: "conv_1",
+        workspaceRoot: "/Users/andrewpeltekci",
+        workspaceHome: "/Users/andrewpeltekci",
+      },
+    );
+
+    expect(await screen.findByText("mac-studio:~/.cloudflared/config.yml")).toBeDefined();
+    expect(await screen.findByText("ubuntu-root:/srv/app/dist/index.js")).toBeDefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("linkifies a '~'-relative path under the workspace root, opening the relative path", async () => {
     // The reported bug: the agent writes `~/ws/foo.md` while the working dir
     // is `~/ws`. With home + root known, this resolves to the root-level file

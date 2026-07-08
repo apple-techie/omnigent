@@ -1,7 +1,7 @@
 """Tests for ``POST /v1/sessions/{id}/switch-agent``.
 
 Exercises the in-place agent-switch endpoint: validation (404 missing
-session, 400 sub-agent / no binding / unloadable bundle, 404 non-bindable
+session, 400 sub-agent / no binding / unloadable bundle, 404 unreadable
 target, 409 while busy) and the happy-path wiring (it clones the target,
 computes the same-family model/history/label deltas, and forwards them to
 ``switch_conversation_agent``). Real-type store stubs — no MagicMock.
@@ -17,8 +17,23 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.testclient import TestClient
 
-from omnigent.entities import Agent, Conversation, ConversationItem, MessageData, PagedList
+from omnigent.entities import (
+    Agent,
+    Conversation,
+    ConversationItem,
+    MessageData,
+    PagedList,
+    ResolvedAccess,
+    SessionPermission,
+)
 from omnigent.errors import OmnigentError
+from omnigent.server.auth import (
+    LEVEL_EDIT,
+    LEVEL_OWNER,
+    LEVEL_READ,
+    RESERVED_USER_PUBLIC,
+    UnifiedAuthProvider,
+)
 from omnigent.server.routes import sessions as sessions_mod
 from omnigent.server.routes.sessions import create_sessions_router
 
@@ -53,6 +68,80 @@ class _AgentStore:
         del after, before, order
         builtins = [a for a in self._agents.values() if a.session_id is None][:limit]
         return PagedList(data=builtins, first_id=None, last_id=None, has_more=False)
+
+
+class _PermissionStore:
+    """Minimal in-memory permission store for switch route auth tests."""
+
+    def __init__(self) -> None:
+        self._grants: dict[tuple[str, str], SessionPermission] = {}
+        self._admins: set[str] = set()
+
+    def grant(self, user_id: str, conversation_id: str, level: int) -> SessionPermission:
+        permission = SessionPermission(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            level=level,
+        )
+        self._grants[(user_id, conversation_id)] = permission
+        return permission
+
+    def get(self, user_id: str, conversation_id: str) -> SessionPermission | None:
+        return self._grants.get((user_id, conversation_id))
+
+    def ensure_user(self, user_id: str, *, is_admin: bool = False) -> None:
+        if is_admin:
+            self._admins.add(user_id)
+
+    def is_admin(self, user_id: str) -> bool:
+        return user_id in self._admins
+
+    def check_access(
+        self,
+        user_id: str | None,
+        conversation_id: str,
+        required_level: int,
+    ) -> bool:
+        if user_id is not None:
+            grant = self.get(user_id, conversation_id)
+            if grant is not None and grant.level >= required_level:
+                return True
+        public_grant = self.get(RESERVED_USER_PUBLIC, conversation_id)
+        return public_grant is not None and public_grant.level >= required_level
+
+    def get_permission_level(
+        self,
+        user_id: str | None,
+        conversation_id: str,
+    ) -> int | None:
+        if user_id is None:
+            return None
+        if self.is_admin(user_id):
+            return LEVEL_OWNER
+        grant = self.get(user_id, conversation_id)
+        if grant is not None:
+            return grant.level
+        public_grant = self.get(RESERVED_USER_PUBLIC, conversation_id)
+        return public_grant.level if public_grant is not None else None
+
+    def resolve_access(
+        self,
+        user_id: str | None,
+        conversation_id: str,
+    ) -> ResolvedAccess:
+        if user_id is None:
+            return ResolvedAccess(
+                is_admin=False,
+                user_grant_level=None,
+                public_grant_level=None,
+            )
+        user_grant = self.get(user_id, conversation_id)
+        public_grant = self.get(RESERVED_USER_PUBLIC, conversation_id)
+        return ResolvedAccess(
+            is_admin=self.is_admin(user_id),
+            user_grant_level=user_grant.level if user_grant is not None else None,
+            public_grant_level=public_grant.level if public_grant is not None else None,
+        )
 
 
 class _ConversationStore:
@@ -257,16 +346,25 @@ def _agent(agent_id: str, name: str, bundle: str, session_id: str | None) -> Age
     )
 
 
-def _build_app(conv_store: _ConversationStore, agent_store: _AgentStore) -> FastAPI:
+def _build_app(
+    conv_store: _ConversationStore,
+    agent_store: _AgentStore,
+    auth_provider: UnifiedAuthProvider | None = None,
+    permission_store: _PermissionStore | None = None,
+) -> FastAPI:
     """Build a FastAPI app mounting the sessions router + error handler.
 
     :param conv_store: Conversation store stub.
     :param agent_store: Agent store stub.
+    :param auth_provider: Optional auth provider for permission tests.
+    :param permission_store: Optional permission store for access checks.
     :returns: A configured FastAPI app.
     """
     router = create_sessions_router(
         conversation_store=conv_store,  # type: ignore[arg-type]
         agent_store=agent_store,  # type: ignore[arg-type]
+        auth_provider=auth_provider,
+        permission_store=permission_store,  # type: ignore[arg-type]
     )
     app = FastAPI()
 
@@ -818,16 +916,86 @@ async def test_switch_400_sub_agent() -> None:
 
 
 @pytest.mark.asyncio
-async def test_switch_404_target_not_bindable() -> None:
-    """404 when the target is a session-scoped agent (not a built-in)."""
+async def test_switch_clones_readable_session_scoped_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A readable session-scoped target is cloned, not rebound."""
     other_session_agent = _agent("ag_other", "other", "bundle/x", "conv_other")
-    conv_store = _ConversationStore(conversations={"conv_src": _conv()})
+    conv_store = _ConversationStore(
+        conversations={
+            "conv_src": _conv(),
+            "conv_other": _conv("conv_other", agent_id="ag_other"),
+        }
+    )
+    agent_store = _AgentStore(
+        {
+            "ag_session_scoped": _CURRENT,
+            "ag_other": other_session_agent,
+            "ag_builtin_origin": _BUILTIN_ORIGIN,
+        }
+    )
+    permission_store = _PermissionStore()
+    permission_store.grant("alice@example.com", "conv_src", LEVEL_EDIT)
+    permission_store.grant("alice@example.com", "conv_other", LEVEL_READ)
+    _patch_family_helpers(monkeypatch, same_family=True, native=False, labels={})
+    client = TestClient(
+        _build_app(
+            conv_store,
+            agent_store,
+            auth_provider=UnifiedAuthProvider(
+                source="header",
+                local_single_user=False,
+                header_name="X-Forwarded-Email",
+            ),
+            permission_store=permission_store,
+        )
+    )
+
+    resp = client.post(
+        "/v1/sessions/conv_src/switch-agent",
+        json={"agent_id": "ag_other"},
+        headers={"X-Forwarded-Email": "alice@example.com"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    call = conv_store.switch_calls[0]
+    assert call["new_agent_bundle_location"] == "bundle/x"
+    assert call["new_agent_name"].startswith("other (switch ag_")
+    assert call["new_agent_id"] != "ag_other"
+
+
+@pytest.mark.asyncio
+async def test_switch_404_unreadable_session_scoped_target() -> None:
+    """404 when the target is a session-scoped agent the caller cannot read."""
+    other_session_agent = _agent("ag_other", "other", "bundle/x", "conv_other")
+    conv_store = _ConversationStore(
+        conversations={
+            "conv_src": _conv(),
+            "conv_other": _conv("conv_other", agent_id="ag_other"),
+        }
+    )
     agent_store = _AgentStore({"ag_session_scoped": _CURRENT, "ag_other": other_session_agent})
-    client = TestClient(_build_app(conv_store, agent_store))
+    permission_store = _PermissionStore()
+    permission_store.grant("alice@example.com", "conv_src", LEVEL_EDIT)
+    client = TestClient(
+        _build_app(
+            conv_store,
+            agent_store,
+            auth_provider=UnifiedAuthProvider(
+                source="header",
+                local_single_user=False,
+                header_name="X-Forwarded-Email",
+            ),
+            permission_store=permission_store,
+        )
+    )
 
-    resp = client.post("/v1/sessions/conv_src/switch-agent", json={"agent_id": "ag_other"})
+    resp = client.post(
+        "/v1/sessions/conv_src/switch-agent",
+        json={"agent_id": "ag_other"},
+        headers={"X-Forwarded-Email": "alice@example.com"},
+    )
 
-    # Session-scoped target → not bindable, mapped to 404, nothing mutated.
     assert resp.status_code == 404, resp.text
     assert conv_store.switch_calls == []
 

@@ -13924,6 +13924,30 @@ def create_sessions_router(
     """
     router = APIRouter()
 
+    async def _cloneable_target_agent(user_id: str | None, agent_id: str) -> Agent:
+        """Return an agent whose bundle may be cloned into another session.
+
+        Template agents are globally cloneable. Session-scoped agents are
+        cloneable only as a bundle source, and only when the caller can read
+        the owning session; the existing session-scoped row is never rebound
+        or shared with the new session.
+        """
+        target_agent = await asyncio.to_thread(agent_store.get, agent_id)
+        if target_agent is None:
+            raise OmnigentError(
+                f"Agent not found or not bindable: {agent_id!r}",
+                code=ErrorCode.NOT_FOUND,
+            )
+        if target_agent.session_id is not None:
+            await _require_access(
+                user_id,
+                target_agent.session_id,
+                LEVEL_READ,
+                permission_store,
+                conversation_store,
+            )
+        return target_agent
+
     # ── POST /sessions ───────────────────────────────────────────
 
     @router.post(
@@ -15453,13 +15477,15 @@ def create_sessions_router(
 
         Deep-copies the source session's conversation items and
         clones the agent into a new session. When ``body.agent_id``
-        is set, the fork binds that built-in agent instead of the
-        source's — switching harness (e.g. Claude-SDK → Claude Code,
-        or Claude → Codex). The source's model settings carry over
-        only within the same provider family; a same-family native
-        target also carries conversation history (the runner rebuilds
-        its transcript). The REPL/CLI binds the fork to its runner via
-        ``PATCH /v1/sessions/{id}`` after creation.
+        is set, the fork clones that target agent's bundle instead of
+        the source's — switching harness (e.g. Claude-SDK → Claude
+        Code, or Claude → Codex). Template agents are cloneable; a
+        session-scoped target is cloneable only when the caller can
+        read its owning session. The source's model settings carry
+        over only within the same provider family; a same-family
+        native target also carries conversation history (the runner
+        rebuilds its transcript). The REPL/CLI binds the fork to its
+        runner via ``PATCH /v1/sessions/{id}`` after creation.
 
         When ``body.up_to_response_id`` is set, only history up to and
         including that response is copied into the fork (a "fork from
@@ -15474,9 +15500,9 @@ def create_sessions_router(
         :returns: A :class:`SessionResponse` describing the newly
             created fork (status ``"idle"``).
         :raises OmnigentError: 404 if *source_id* does not exist
-            or ``body.agent_id`` is not a bindable built-in agent;
-            403 if the caller lacks read access; 400 if the source
-            is a sub-agent session, has no agent binding, or
+            or ``body.agent_id`` is not a cloneable target; 403 if
+            the caller lacks read access; 400 if the source is a
+            sub-agent session, has no agent binding, or
             ``body.up_to_response_id`` names no response in the
             source session.
         """
@@ -15512,20 +15538,13 @@ def create_sessions_router(
 
         # By default the fork clones the source's agent (same harness). When
         # ``body.agent_id`` names a different agent, the fork SWITCHES to it
-        # — e.g. fork a Claude-SDK session into Claude Code. Only built-in
-        # agents (``session_id IS NULL``) are bindable: a session-scoped
-        # agent belongs to one conversation (possibly another user's) and
-        # must never be cloned across sessions.
+        # by cloning that target's bundle into a fresh session-scoped agent
+        # row. Session-scoped targets are allowed only as readable clone
+        # sources; the existing row is never rebound or aliased.
         base_agent = source_agent
         switching_agent = body.agent_id is not None and body.agent_id != source.agent_id
         if switching_agent:
-            target_agent = await asyncio.to_thread(agent_store.get, body.agent_id)
-            if target_agent is None or target_agent.session_id is not None:
-                raise OmnigentError(
-                    f"Agent not found or not bindable: {body.agent_id!r}",
-                    code=ErrorCode.NOT_FOUND,
-                )
-            base_agent = target_agent
+            base_agent = await _cloneable_target_agent(user_id, body.agent_id)
 
         # Clone params for the fork's session-scoped agent. Created inside
         # fork_conversation's transaction (not agent_store.create): a
@@ -15689,13 +15708,15 @@ def create_sessions_router(
         Unlike fork, this keeps the SAME session — transcript, comments,
         files, host, and workspace are untouched; only the agent/harness
         changes. The current session-scoped agent is replaced by a clone
-        of the target built-in, model settings carry over only within the
-        same provider family (a model id is provider-bound), the native
-        runtime session id is cleared, and the harness-presentation labels
-        are recomputed for the target. The next turn cold-starts the new
-        harness (rebuilding the native transcript from this session's own
-        items for a same-family native target). Only built-in agents are
-        bindable, and only while the session is idle.
+        of the target agent's bundle, model settings carry over only
+        within the same provider family (a model id is provider-bound),
+        the native runtime session id is cleared, and the
+        harness-presentation labels are recomputed for the target. The
+        next turn cold-starts the new harness (rebuilding the native
+        transcript from this session's own items for a same-family native
+        target). Template agents are cloneable; session-scoped targets
+        are cloneable only when the caller can read their owning session.
+        Switching is allowed only while the session is idle.
 
         :param request: The incoming FastAPI request (for auth).
         :param session_id: Session/conversation identifier to switch,
@@ -15704,10 +15725,10 @@ def create_sessions_router(
         :returns: A :class:`SessionResponse` describing the session after
             the switch (status ``"idle"``).
         :raises OmnigentError: 404 if the session or target agent does
-            not exist or the target is not a bindable built-in; 403 if the
-            caller lacks edit access; 400 if the session is a sub-agent,
-            has no agent binding, or the target bundle can't be loaded;
-            409 if a turn is currently running.
+            not exist or the target is not cloneable; 403 if the caller
+            lacks edit access; 400 if the session is a sub-agent, has
+            no agent binding, or the target bundle can't be loaded; 409
+            if a turn is currently running.
         """
         user_id = _get_user_id(request, auth_provider)
         access = await _require_access_and_level(
@@ -15748,15 +15769,10 @@ def create_sessions_router(
                 code=ErrorCode.NOT_FOUND,
             )
 
-        # Only built-in agents (``session_id IS NULL``) are bindable: a
-        # session-scoped agent belongs to one conversation (possibly another
-        # user's) and must never be cloned across sessions.
-        target_agent = await asyncio.to_thread(agent_store.get, body.agent_id)
-        if target_agent is None or target_agent.session_id is not None:
-            raise OmnigentError(
-                f"Agent not found or not bindable: {body.agent_id!r}",
-                code=ErrorCode.NOT_FOUND,
-            )
+        # Clone the selected target's bundle into this session. If the
+        # selected target is itself session-scoped, authorize the owning
+        # session first; never rebind or share that existing row.
+        target_agent = await _cloneable_target_agent(user_id, body.agent_id)
 
         # Reject a no-op switch to the built-in the session is already running:
         # its session-scoped clone shares the built-in's ``bundle_location``, so
@@ -17170,6 +17186,7 @@ def create_sessions_router(
         session_id: str,
         path: str,
         params: dict[str, str] | None = None,
+        missing_ok_empty_list: bool = False,
     ) -> dict[str, Any]:
         """Proxy a GET request to the runner and return parsed JSON.
 
@@ -17177,6 +17194,11 @@ def create_sessions_router(
         :param path: Runner-relative URL path.
         :param params: Optional query params forwarded to the runner,
             e.g. ``{"order": "asc"}``. ``None`` sends no query string.
+        :param missing_ok_empty_list: Convert a runner 404 into an empty
+            ``object: "list"`` payload. Used only by tolerant filesystem
+            existence probes so older live runners that do not understand
+            ``missing_ok=true`` do not surface expected misses as browser
+            errors.
         :returns: Parsed JSON response body.
         :raises HTTPException: 502 on runner failure.
         """
@@ -17195,6 +17217,14 @@ def create_sessions_router(
                 status_code=502,
                 detail="runner resource endpoint unavailable",
             ) from exc
+        if resp.status_code == 404 and missing_ok_empty_list:
+            return {
+                "object": "list",
+                "data": [],
+                "first_id": None,
+                "last_id": None,
+                "has_more": False,
+            }
         if resp.status_code == 404:
             raise OmnigentError(
                 resp.json().get("error", {}).get("message", "Resource not found"),
@@ -17993,6 +18023,7 @@ def create_sessions_router(
         after: str | None = Query(default=None),
         before: str | None = Query(default=None),
         order: str = Query(default="desc", pattern="^(asc|desc)$"),
+        missing_ok: bool = Query(default=False),
     ) -> Any:
         """
         List root directory of an environment.
@@ -18004,6 +18035,7 @@ def create_sessions_router(
         :param after: Cursor entry id for forward pagination.
         :param before: Cursor entry id for backward pagination.
         :param order: Sort order, ``"asc"`` or ``"desc"``.
+        :param missing_ok: When true, return an empty list for absent paths.
         :returns: PaginatedList of filesystem entries.
         """
         params: dict[str, str] = {"limit": str(limit), "order": order}
@@ -18011,10 +18043,16 @@ def create_sessions_router(
             params["after"] = after
         if before is not None:
             params["before"] = before
+        if missing_ok:
+            params["missing_ok"] = "true"
         qs = urllib.parse.urlencode(params)
         path = f"/v1/sessions/{session_id}/resources/environments/{environment_id}/filesystem?{qs}"
         await _validate_session(session_id, request, LEVEL_READ)
-        return await _proxy_get_to_runner(session_id, path)
+        return await _proxy_get_to_runner(
+            session_id,
+            path,
+            missing_ok_empty_list=missing_ok,
+        )
 
     @router.get(
         "/sessions/{session_id}/resources/environments/{environment_id}/search",
@@ -18133,6 +18171,7 @@ def create_sessions_router(
         after: str | None = Query(default=None),
         before: str | None = Query(default=None),
         order: str = Query(default="desc", pattern="^(asc|desc)$"),
+        missing_ok: bool = Query(default=False),
     ) -> Any:
         """
         Read a file or list a directory in an environment.
@@ -18146,6 +18185,7 @@ def create_sessions_router(
         :param after: Cursor entry id for forward pagination.
         :param before: Cursor entry id for backward pagination.
         :param order: Sort order, ``"asc"`` or ``"desc"``.
+        :param missing_ok: When true, return an empty list for absent paths.
         :returns: File content or directory listing.
         """
         params: dict[str, str] = {"limit": str(limit), "order": order}
@@ -18153,13 +18193,19 @@ def create_sessions_router(
             params["after"] = after
         if before is not None:
             params["before"] = before
+        if missing_ok:
+            params["missing_ok"] = "true"
         qs = urllib.parse.urlencode(params)
         path = (
             f"/v1/sessions/{session_id}/resources/environments"
             f"/{environment_id}/filesystem/{relative_path}?{qs}"
         )
         await _validate_session(session_id, request, LEVEL_READ)
-        return await _proxy_get_to_runner(session_id, path)
+        return await _proxy_get_to_runner(
+            session_id,
+            path,
+            missing_ok_empty_list=missing_ok,
+        )
 
     @router.put(
         "/sessions/{session_id}/resources/environments"

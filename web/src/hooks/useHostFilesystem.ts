@@ -31,7 +31,7 @@ export interface HostFilesystemEntry {
 
 interface HostFilesystemResponse {
   object: string;
-  data: HostFilesystemEntry[];
+  data: unknown;
   has_more: boolean;
 }
 
@@ -95,6 +95,42 @@ const PAGE_SIZE = 1000;
 // Safety cap against a pathologically large directory looping forever.
 const MAX_PAGES = 50;
 
+function basename(path: string): string {
+  const trimmed = path.replace(/\/+$/, "");
+  if (trimmed === "") return "/";
+  return trimmed.split("/").pop() || trimmed;
+}
+
+function normalizeHostFilesystemEntry(value: unknown): HostFilesystemEntry | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  if (typeof raw.path !== "string" || raw.path.length === 0) return null;
+
+  const type =
+    raw.type === "directory" || raw.type === "file" || raw.type === "other" ? raw.type : "other";
+  const bytes = typeof raw.bytes === "number" && Number.isFinite(raw.bytes) ? raw.bytes : null;
+  const modifiedAt =
+    typeof raw.modified_at === "number" && Number.isFinite(raw.modified_at)
+      ? raw.modified_at
+      : 0;
+
+  return {
+    name: typeof raw.name === "string" && raw.name.length > 0 ? raw.name : basename(raw.path),
+    path: raw.path,
+    type,
+    bytes,
+    modified_at: modifiedAt,
+  };
+}
+
+function normalizeHostFilesystemEntries(value: unknown): HostFilesystemEntry[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    const normalized = normalizeHostFilesystemEntry(entry);
+    return normalized === null ? [] : [normalized];
+  });
+}
+
 /**
  * Fetch every entry in a host directory, following the endpoint's
  * ``has_more`` / ``after`` pagination to completion.
@@ -131,12 +167,13 @@ async function fetchHostFilesystem(hostId: string, path: string): Promise<HostDi
       throw err;
     }
     const body = (await res.json()) as HostFilesystemResponse;
-    entries.push(...body.data);
+    const pageEntries = normalizeHostFilesystemEntries(body.data);
+    entries.push(...pageEntries);
     // Empty-page guard is defensive: a bad cursor must not loop.
-    if (!body.has_more || body.data.length === 0) {
+    if (!body.has_more || pageEntries.length === 0) {
       break;
     }
-    after = body.data[body.data.length - 1].path;
+    after = pageEntries[pageEntries.length - 1].path;
     // Loop is about to exit on the cap but the server has more —
     // the listing is incomplete; let the UI say so.
     if (page === MAX_PAGES - 1) {

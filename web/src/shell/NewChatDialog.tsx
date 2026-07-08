@@ -80,7 +80,11 @@ import {
   onHostStatusChanged,
   type HostIdentity,
 } from "@/lib/nativeBridge";
-import { useAvailableAgents, type AvailableAgent } from "@/hooks/useAvailableAgents";
+import {
+  normalizeAgentSkills,
+  useAvailableAgents,
+  type AvailableAgent,
+} from "@/hooks/useAvailableAgents";
 import { useAutoGrowTextarea } from "@/hooks/useAutoGrowTextarea";
 import { useRecentWorkspaces } from "@/hooks/useRecentWorkspaces";
 import { useDirectorySessions } from "@/hooks/useDirectorySessions";
@@ -695,7 +699,7 @@ export function matchSkillInvocation(
  * @returns The home directory path, or ``null`` when it can't be derived.
  */
 export function deriveHomeDir(entries: HostFilesystemEntry[]): string | null {
-  const first = entries[0];
+  const first = entries.find((entry) => typeof entry.path === "string" && entry.path.length > 0);
   if (!first) return null;
   const slash = first.path.lastIndexOf("/");
   if (slash < 0) return null;
@@ -1680,11 +1684,39 @@ type LandingDraft = {
 
 let landingDraft: LandingDraft | null = null;
 
+function draftString(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value : fallback;
+}
+
+function draftNullableString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function draftBoolean(value: unknown): boolean {
+  return value === true;
+}
+
+function draftFiles(value: unknown): File[] {
+  return Array.isArray(value)
+    ? value.filter((file): file is File => typeof file === "object" && file !== null)
+    : [];
+}
+
+function draftCostControlMode(value: unknown): CostControlMode {
+  return value === "on" || value === "off" ? value : null;
+}
+
 // Test-only: clears the preserved landing draft so each case starts from a
 // clean module state (the draft is module-scoped and survives unmount by
 // design, which would otherwise leak between tests).
 export function resetLandingDraft(): void {
   landingDraft = null;
+}
+
+// Test-only: seeds the preserved draft with a raw value so regression tests
+// can cover malformed drafts from older in-memory/runtime state.
+export function setLandingDraftForTest(value: unknown): void {
+  landingDraft = typeof value === "object" && value !== null ? (value as LandingDraft) : null;
 }
 
 export function NewChatLandingScreen() {
@@ -1732,17 +1764,18 @@ export function NewChatLandingScreen() {
   const [landingSurface, setLandingSurface] = useState<HTMLElement | null>(null);
   useNativeServerSwitcherForMainSurface(landingSurface, true);
 
-  const [message, setMessage] = useState<string>(() => landingDraft?.message ?? "");
+  const [message, setMessage] = useState<string>(() => draftString(landingDraft?.message));
+  const messageText = draftString(message);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const isComposingRef = useRef(false);
   // maxRows 9 = 180px of 20px lines, matching the composer's 200px
   // border-box max (180px content + 16px top / 4px bottom padding).
-  useAutoGrowTextarea(textareaRef, message, 9);
+  useAutoGrowTextarea(textareaRef, messageText, 9);
 
   // Attachments for the first message — same affordances as the in-session
   // composer (paperclip + paste); carried to ChatPage via the pending
   // initial prompt and sent with the auto-dispatched first turn.
-  const [files, setFiles] = useState<File[]>(() => landingDraft?.files ?? []);
+  const [files, setFiles] = useState<File[]>(() => draftFiles(landingDraft?.files));
   const fileInputRef = useRef<HTMLInputElement>(null);
   const addFiles = (incoming: File[]) => setFiles((prev) => [...prev, ...incoming]);
   const removeFile = (index: number) => setFiles((prev) => prev.filter((_, i) => i !== index));
@@ -1804,16 +1837,16 @@ export function NewChatLandingScreen() {
   // agent they used last; validated against the live list in
   // effectiveAgentId below (a stale id falls back to the default).
   const [pickedAgentId, setPickedAgentId] = useState<string | null>(
-    () => landingDraft?.pickedAgentId ?? readLastAgentId(),
+    () => draftNullableString(landingDraft?.pickedAgentId) ?? readLastAgentId(),
   );
   const [selectedHostId, setSelectedHostId] = useState<string | null>(
-    () => landingDraft?.selectedHostId ?? null,
+    () => draftNullableString(landingDraft?.selectedHostId),
   );
   // True when the user picked the sandbox option instead of a connected
   // host — the server provisions a sandbox host at create time
   // (host_type: "managed"), so no host_id or workspace is sent.
   const [sandboxSelected, setSandboxSelected] = useState(
-    () => landingDraft?.sandboxSelected ?? false,
+    () => draftBoolean(landingDraft?.sandboxSelected),
   );
   // Desktop-shell host status for THIS machine (null outside Electron), so the
   // picker can tag the current machine and offer to auto-connect it.
@@ -1827,14 +1860,14 @@ export function NewChatLandingScreen() {
   // `workspace` string (`<url>[#<branch>]`); both blank = empty
   // server-created workspace.
   const [sandboxRepoUrl, setSandboxRepoUrl] = useState<string>(
-    () => landingDraft?.sandboxRepoUrl ?? "",
+    () => draftString(landingDraft?.sandboxRepoUrl),
   );
   const [sandboxRepoBranch, setSandboxRepoBranch] = useState<string>(
-    () => landingDraft?.sandboxRepoBranch ?? "",
+    () => draftString(landingDraft?.sandboxRepoBranch),
   );
-  const [workspace, setWorkspace] = useState<string>(() => landingDraft?.workspace ?? "");
-  const [branchName, setBranchName] = useState<string>(() => landingDraft?.branchName ?? "");
-  const [baseBranch, setBaseBranch] = useState<string>(() => landingDraft?.baseBranch ?? "");
+  const [workspace, setWorkspace] = useState<string>(() => draftString(landingDraft?.workspace));
+  const [branchName, setBranchName] = useState<string>(() => draftString(landingDraft?.branchName));
+  const [baseBranch, setBaseBranch] = useState<string>(() => draftString(landingDraft?.baseBranch));
   // Project to file the new session under (an implicit collection stored as a
   // conversation_labels row). Empty = unfiled. Applied right after create.
   // Pre-filled from a `?project=` query param so the sidebar's per-project
@@ -1851,13 +1884,13 @@ export function NewChatLandingScreen() {
   // meaningful for the claude-native wrapper; ignored otherwise. Lives in
   // the footer tray's Advanced settings menu.
   const [permissionMode, setPermissionMode] = useState<string>(
-    () => landingDraft?.permissionMode ?? CLAUDE_NATIVE_DEFAULT_PERMISSION_MODE,
+    () => draftString(landingDraft?.permissionMode, CLAUDE_NATIVE_DEFAULT_PERMISSION_MODE),
   );
   // Approval mode for Codex (codex --approval-mode). Only meaningful for
   // the codex-native wrapper; ignored otherwise. Lives in the footer
   // tray's Advanced settings menu.
   const [approvalMode, setApprovalMode] = useState<string>(
-    () => landingDraft?.approvalMode ?? CODEX_NATIVE_DEFAULT_APPROVAL_MODE,
+    () => draftString(landingDraft?.approvalMode, CODEX_NATIVE_DEFAULT_APPROVAL_MODE),
   );
   // DANGEROUS codex full-bypass opt-in (Codex only). OFF by default and only
   // flippable on after the user types the confirmation phrase, so it can
@@ -1865,31 +1898,35 @@ export function NewChatLandingScreen() {
   // label so it survives reload. When on, a persistent red banner warns and
   // the runner ignores the approval-mode preset's flags.
   const [bypassSandbox, setBypassSandbox] = useState<boolean>(
-    () => landingDraft?.bypassSandbox ?? false,
+    () => draftBoolean(landingDraft?.bypassSandbox),
   );
   // Execution mode for Cursor (cursor-agent --mode / --yolo). Only meaningful
   // for the cursor-native wrapper; ignored otherwise.
   const [cursorExecMode, setCursorExecMode] = useState<string>(
-    () => landingDraft?.cursorExecMode ?? CURSOR_NATIVE_DEFAULT_EXEC_MODE,
+    () => draftString(landingDraft?.cursorExecMode, CURSOR_NATIVE_DEFAULT_EXEC_MODE),
   );
   // Per-session brain-harness override for bundle agents (polly / debby).
   // null = the agent spec's declared harness (no override sent); cleared on
   // every agent switch so a pick never leaks across agents.
   const [pickedHarness, setPickedHarness] = useState<string | null>(
-    () => landingDraft?.pickedHarness ?? null,
+    () => draftNullableString(landingDraft?.pickedHarness),
   );
   // Per-session model + reasoning effort for the claude-native model picker.
   // "" = unselected: nothing is checked and `model_override` / `reasoning_effort`
   // are omitted from the create, so Claude Code uses its own configured model.
   // An explicit pick rides along and is remembered (seeded back on a later visit
   // via the harness-seed effect below).
-  const [pickedModel, _setPickedModel] = useState<string>(() => landingDraft?.pickedModel ?? "");
-  const [pickedEffort, setPickedEffort] = useState<string>(() => landingDraft?.pickedEffort ?? "");
+  const [pickedModel, _setPickedModel] = useState<string>(() =>
+    draftString(landingDraft?.pickedModel),
+  );
+  const [pickedEffort, setPickedEffort] = useState<string>(() =>
+    draftString(landingDraft?.pickedEffort),
+  );
   // Per-session cost-control switch ("Cost Optimized" pill). Unset
   // (null) defers to the agent spec's default and is omitted from
   // the create body.
   const [costControlMode, _setCostControlMode] = useState<CostControlMode>(
-    () => landingDraft?.costControlMode ?? null,
+    () => draftCostControlMode(landingDraft?.costControlMode),
   );
   // Model selection and smart routing are mutually exclusive: enabling
   // routing clears the explicit model pick, and picking a model turns
@@ -1916,7 +1953,7 @@ export function NewChatLandingScreen() {
   const submittedRef = useRef(false);
   const draftRef = useRef<LandingDraft>(null as unknown as LandingDraft);
   draftRef.current = {
-    message,
+    message: messageText,
     files,
     pickedAgentId,
     selectedHostId,
@@ -2167,24 +2204,27 @@ export function NewChatLandingScreen() {
   // live session. Hidden for native-terminal agents (their CLI owns
   // slash commands) and for agents without bundled skills.
   const [slashMenuIndex, setSlashMenuIndex] = useState(-1);
+  const selectedAgentSkills = useMemo(
+    () => normalizeAgentSkills(selectedAgent?.skills),
+    [selectedAgent],
+  );
   const skillCommands = useMemo(() => {
     if (isNativeTerminalAgent) return {};
     const m: Record<string, string> = {};
-    for (const s of selectedAgent?.skills ?? []) m[`/${s.name}`] = s.description;
+    for (const s of selectedAgentSkills) m[`/${s.name}`] = s.description;
     return m;
-  }, [selectedAgent, isNativeTerminalAgent]);
-  const trimmedMessage = message.trimStart();
+  }, [selectedAgentSkills, isNativeTerminalAgent]);
+  const trimmedMessage = messageText.trimStart();
   const slashMenuOpen =
     trimmedMessage.startsWith("/") &&
     !trimmedMessage.slice(1).includes("/") &&
     !trimmedMessage.includes(" ");
   const slashMenuQuery = slashMenuOpen ? trimmedMessage.slice(1) : "";
+  const slashMenuQueryLower = slashMenuQuery.toLowerCase();
   // Kept in sync with what SlashCommandMenu renders so keyboard nav
   // indexes into the same list.
   const slashMenuMatches = slashMenuOpen
-    ? Object.keys(skillCommands).filter((name) =>
-        name.slice(1).startsWith(slashMenuQuery.toLowerCase()),
-      )
+    ? Object.keys(skillCommands).filter((name) => name.slice(1).startsWith(slashMenuQueryLower))
     : [];
   // Pre-select the first match whenever the filtered list changes, so
   // Tab/Enter complete the top item without arrowing down first (same
@@ -2209,7 +2249,7 @@ export function NewChatLandingScreen() {
   // Always-visible skill pills for the allowlisted orchestrators, fed by
   // the same bundled-skills list as the "/" menu.
   const pillSkills =
-    selectedAgent && SKILL_PILL_AGENTS.has(selectedAgent.name) ? selectedAgent.skills : [];
+    selectedAgent && SKILL_PILL_AGENTS.has(selectedAgent.name) ? selectedAgentSkills : [];
 
   // Pills only render over an empty draft, so there's never args to preserve.
   function applySkillPill(name: string) {
@@ -2252,7 +2292,12 @@ export function NewChatLandingScreen() {
     // the current directory's own listing arrives.
     if (mentionFsQuery.isPlaceholderData) return [];
     const rows = (mentionFsQuery.data?.entries ?? [])
-      .filter((e) => e.type === "directory" || e.type === "file")
+      .filter(
+        (e) =>
+          typeof e.path === "string" &&
+          typeof e.name === "string" &&
+          (e.type === "directory" || e.type === "file"),
+      )
       .map(
         (e): WorkspaceFile => ({
           path: e.path.startsWith(workspaceRoot)
@@ -2296,13 +2341,13 @@ export function NewChatLandingScreen() {
     mention,
     setMention,
     mentionEntries,
-    text: message,
+    text: messageText,
     setText: setMessage,
     textareaRef,
   });
 
   const canSubmit =
-    message.trim().length > 0 &&
+    messageText.trim().length > 0 &&
     selectedAgent != null &&
     (sandboxSelected ? sandboxRepoValid : !!selectedHostId && workspaceValid) &&
     !creating;
@@ -2317,7 +2362,7 @@ export function NewChatLandingScreen() {
       ? "Please enter a valid repository URL"
       : !sandboxSelected && (!selectedHostId || !workspaceValid)
         ? "Please choose a host and working directory"
-        : message.trim().length === 0
+        : messageText.trim().length === 0
           ? "Enter a message to get started"
           : null;
 
@@ -2412,6 +2457,7 @@ export function NewChatLandingScreen() {
     try {
       const trimmedBranch = branchName.trim();
       const agent = agentList.find((a) => a.id === effectiveAgentId);
+      const agentSkills = normalizeAgentSkills(agent?.skills);
       const nativeLabels = nativeWrapperLabelsForAgent(agent);
       const agentSupportsPermissionMode = nativeAgentHasCapability(agent, "permissionMode");
       const agentSupportsApprovalMode = nativeAgentHasCapability(agent, "approvalMode");
@@ -2538,7 +2584,7 @@ export function NewChatLandingScreen() {
       // from the marker; no upload happens. Folders carry a trailing "/".
       const initialPrompt =
         buildMentionPreamble(mentionedItems, selectedAgent?.harness ?? null) +
-        sanitizeInitialPrompt(message);
+        sanitizeInitialPrompt(messageText);
       // A first message matching one of the agent's bundled skills is
       // handed off as a structured invocation so ChatPage auto-sends it
       // as a `slash_command` event (server resolves the skill) instead
@@ -2548,7 +2594,7 @@ export function NewChatLandingScreen() {
         text: initialPrompt,
         skill: isNativeTerminalAgent
           ? null
-          : matchSkillInvocation(initialPrompt, agent?.skills ?? []),
+          : matchSkillInvocation(initialPrompt, agentSkills),
         files,
       });
       // Scope the recall entry to the new session id so ArrowUp surfaces it in
@@ -2660,7 +2706,7 @@ export function NewChatLandingScreen() {
             )}
             <textarea
               ref={textareaRef}
-              value={message}
+              value={messageText}
               onChange={(e) => {
                 setMessage(e.target.value);
                 // Recompute the active "@"-mention from the caret each keystroke
@@ -2767,7 +2813,7 @@ export function NewChatLandingScreen() {
             {/* Gated on an empty draft so it reads as the placeholder.
                 pointer-events-none lets clicks fall through to focus the
                 textarea; the pills themselves opt back in. */}
-            {pillSkills.length > 0 && message.length === 0 && (
+            {pillSkills.length > 0 && messageText.length === 0 && (
               <div className="pointer-events-none absolute inset-x-4 top-4 flex flex-wrap items-center gap-2">
                 <span className="font-['SF_Pro_Text',-apple-system,BlinkMacSystemFont,system-ui,sans-serif] text-sm leading-5 text-muted-foreground">
                   Describe a task, or try a skill
@@ -2830,7 +2876,7 @@ export function NewChatLandingScreen() {
                     key={i}
                     className="flex items-center gap-1 rounded-full border border-border bg-muted px-2 py-0.5 text-xs text-muted-foreground"
                   >
-                    {file.type.startsWith("image/") ? (
+                    {file.type?.startsWith("image/") ? (
                       <ImageIcon className="size-3 shrink-0" />
                     ) : (
                       <FileTextIcon className="size-3 shrink-0" />

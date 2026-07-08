@@ -139,6 +139,20 @@ describe("UserBubble copy button", () => {
     );
     expect(screen.queryByRole("button", { name: "Copy" })).toBeNull();
   });
+
+  it("renders a malformed image block without a file_id as a chip", () => {
+    renderBubble(
+      userBubble("", {
+        content: [{ type: "input_image", filename: "legacy.png" }] as unknown as Extract<
+          Bubble,
+          { kind: "user" }
+        >["content"],
+      }),
+    );
+
+    expect(screen.getByText("legacy.png")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Copy" })).toBeNull();
+  });
 });
 
 describe("UserBubble @-mention attachment chips", () => {

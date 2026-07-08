@@ -496,6 +496,22 @@ async def test_read_nonexistent_file_returns_404(
 
 
 @pytest.mark.asyncio
+async def test_list_nonexistent_path_missing_ok_returns_empty_list(
+    client: httpx.AsyncClient,
+) -> None:
+    """GET /filesystem/missing?missing_ok=true is quiet for existence probes."""
+    resp = await client.get(
+        f"/v1/sessions/conv_test/resources/environments"
+        f"/{DEFAULT_ENVIRONMENT_ID}/filesystem/nope?missing_ok=true"
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["object"] == "list"
+    assert body["data"] == []
+    assert body["has_more"] is False
+
+
+@pytest.mark.asyncio
 async def test_filesystem_session_without_agent_id_returns_typed_404(
     registry: SessionResourceRegistry,
 ) -> None:

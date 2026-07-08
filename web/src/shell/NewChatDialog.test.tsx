@@ -19,6 +19,7 @@ import {
   sessionsSharingDirectory,
   NewChatLandingScreen,
   resetLandingDraft,
+  setLandingDraftForTest,
 } from "./NewChatDialog";
 import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
 import type { ServerInfo } from "@/lib/capabilities";
@@ -40,7 +41,10 @@ vi.mock("@/lib/identity", async (importOriginal) => ({
   authenticatedFetch: vi.fn(),
 }));
 vi.mock("@/hooks/useHosts", () => ({ useHosts: vi.fn() }));
-vi.mock("@/hooks/useAvailableAgents", () => ({ useAvailableAgents: vi.fn() }));
+vi.mock("@/hooks/useAvailableAgents", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/hooks/useAvailableAgents")>()),
+  useAvailableAgents: vi.fn(),
+}));
 vi.mock("@/hooks/useHostFilesystem", () => ({
   useHostFilesystem: vi.fn(),
   // WorkspacePicker (rendered by the file browser) reads this on mount;
@@ -685,6 +689,25 @@ describe("NewChatLandingScreen", () => {
     );
     // The attachment chip re-renders from the restored draft.
     expect(screen.getByText("diagram.png")).toBeTruthy();
+  });
+
+  it("coerces malformed preserved draft fields before rendering the composer", () => {
+    setLandingDraftForTest({
+      message: { trimStart: () => undefined },
+      files: [null, { name: "stale.txt", type: undefined }],
+      selectedHostId: 42,
+      sandboxSelected: "yes",
+      workspace: { path: "/tmp" },
+      permissionMode: null,
+      approvalMode: null,
+      cursorExecMode: null,
+      costControlMode: "legacy",
+    });
+
+    renderLanding();
+
+    expect((screen.getByTestId("new-chat-landing-input") as HTMLTextAreaElement).value).toBe("");
+    expect(screen.getByText("stale.txt")).toBeTruthy();
   });
 
   it("enables submit only once a message, host, agent and valid workspace are set", async () => {
@@ -1554,6 +1577,27 @@ describe("NewChatLandingScreen skills menu", () => {
     typeMessage("/");
     expect(screen.queryByTestId("slash-menu-item-review-pr")).toBeNull();
   });
+
+  it("ignores malformed bundled skills instead of crashing the slash menu", () => {
+    mockAgents([
+      {
+        ...skilledAgent(),
+        skills: [
+          { name: "review-pr", description: "Review a pull request" },
+          { name: undefined, description: "missing name" },
+          { name: "", description: "blank name" },
+          { name: "cross-review", description: undefined },
+          null,
+        ] as unknown as AvailableAgent["skills"],
+      },
+    ]);
+    renderLanding();
+    typeMessage("/");
+
+    expect(screen.getByTestId("slash-menu-item-review-pr")).toBeTruthy();
+    expect(screen.getByTestId("slash-menu-item-cross-review")).toBeTruthy();
+    expect(screen.queryByTestId("slash-menu-item-undefined")).toBeNull();
+  });
 });
 
 // Always-visible skill pills under the landing composer for allowlisted
@@ -1780,6 +1824,30 @@ describe("NewChatLandingScreen @-file-mention", () => {
     // Host absolute paths are shown as workspace-relative rows (folders first).
     expect(screen.getByTitle("Open omnigent")).toBeInTheDocument();
     expect(screen.getByTitle("Attach README.md")).toBeInTheDocument();
+  });
+
+  it("ignores malformed host filesystem rows instead of crashing", async () => {
+    useHostFilesystemMock.mockReturnValue({
+      data: {
+        entries: [
+          { name: "bad", type: "file", bytes: null, modified_at: 0 },
+          file(`${ROOT}/README.md`),
+        ] as unknown as HostFilesystemEntry[],
+        truncated: false,
+      },
+      isLoading: false,
+      error: null,
+      isPlaceholderData: false,
+    } as unknown as ReturnType<typeof useHostFilesystem>);
+
+    renderLanding();
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-workspace-chip").textContent).toContain("repo"),
+    );
+    fireEvent.change(input(), { target: { value: "@", selectionStart: 1 } });
+
+    expect(screen.getByTitle("Attach README.md")).toBeInTheDocument();
+    expect(screen.queryByText("bad")).not.toBeInTheDocument();
   });
 
   it("does NOT open the menu for a non-native (SDK) agent", () => {

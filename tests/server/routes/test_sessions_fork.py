@@ -14,8 +14,17 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.testclient import TestClient
 
-from omnigent.entities import Agent, Conversation, ConversationItem, MessageData, PagedList
+from omnigent.entities import (
+    Agent,
+    Conversation,
+    ConversationItem,
+    MessageData,
+    PagedList,
+    ResolvedAccess,
+    SessionPermission,
+)
 from omnigent.errors import OmnigentError
+from omnigent.server.auth import LEVEL_OWNER, LEVEL_READ, RESERVED_USER_PUBLIC, UnifiedAuthProvider
 from omnigent.server.routes.sessions import create_sessions_router
 
 # ── Minimal store stubs ──────────────────────────────────────────
@@ -83,6 +92,87 @@ class _AgentStore:
         )
         self._agents[agent_id] = agent
         return agent
+
+
+class _PermissionStore:
+    """Minimal in-memory permission store for fork route auth tests."""
+
+    def __init__(self) -> None:
+        self._grants: dict[tuple[str, str], SessionPermission] = {}
+        self._admins: set[str] = set()
+
+    def grant(self, user_id: str, conversation_id: str, level: int) -> SessionPermission:
+        """Upsert a permission grant."""
+        permission = SessionPermission(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            level=level,
+        )
+        self._grants[(user_id, conversation_id)] = permission
+        return permission
+
+    def get(self, user_id: str, conversation_id: str) -> SessionPermission | None:
+        """Return a direct grant if present."""
+        return self._grants.get((user_id, conversation_id))
+
+    def ensure_user(self, user_id: str, *, is_admin: bool = False) -> None:
+        """Record admin users; regular users need no backing row in this stub."""
+        if is_admin:
+            self._admins.add(user_id)
+
+    def is_admin(self, user_id: str) -> bool:
+        """Return whether the user is an admin."""
+        return user_id in self._admins
+
+    def check_access(
+        self,
+        user_id: str | None,
+        conversation_id: str,
+        required_level: int,
+    ) -> bool:
+        """Return whether a direct or public grant is sufficient."""
+        if user_id is not None:
+            grant = self.get(user_id, conversation_id)
+            if grant is not None and grant.level >= required_level:
+                return True
+        public_grant = self.get(RESERVED_USER_PUBLIC, conversation_id)
+        return public_grant is not None and public_grant.level >= required_level
+
+    def get_permission_level(
+        self,
+        user_id: str | None,
+        conversation_id: str,
+    ) -> int | None:
+        """Return the displayed permission level for route responses."""
+        if user_id is None:
+            return None
+        if self.is_admin(user_id):
+            return LEVEL_OWNER
+        grant = self.get(user_id, conversation_id)
+        if grant is not None:
+            return grant.level
+        public_grant = self.get(RESERVED_USER_PUBLIC, conversation_id)
+        return public_grant.level if public_grant is not None else None
+
+    def resolve_access(
+        self,
+        user_id: str | None,
+        conversation_id: str,
+    ) -> ResolvedAccess:
+        """Return the access snapshot used by require_access_and_level."""
+        if user_id is None:
+            return ResolvedAccess(
+                is_admin=False,
+                user_grant_level=None,
+                public_grant_level=None,
+            )
+        user_grant = self.get(user_id, conversation_id)
+        public_grant = self.get(RESERVED_USER_PUBLIC, conversation_id)
+        return ResolvedAccess(
+            is_admin=self.is_admin(user_id),
+            user_grant_level=user_grant.level if user_grant is not None else None,
+            public_grant_level=public_grant.level if public_grant is not None else None,
+        )
 
 
 class _ConversationStore:
@@ -308,6 +398,8 @@ def _make_item(item_id: str, text: str, response_id: str = "resp_001") -> Conver
 def _build_app(
     store: _ConversationStore,
     agent_store: _AgentStore | None = None,
+    auth_provider: UnifiedAuthProvider | None = None,
+    permission_store: _PermissionStore | None = None,
 ) -> FastAPI:
     """
     Build a FastAPI app with the sessions router and error handler.
@@ -319,6 +411,8 @@ def _build_app(
     :param store: The conversation store stub.
     :param agent_store: The agent store stub. Defaults to a
         pre-populated stub with ``ag_test``.
+    :param auth_provider: Optional auth provider for permission tests.
+    :param permission_store: Optional permission store for access checks.
     :returns: A configured FastAPI app ready for TestClient.
     """
     if agent_store is None:
@@ -336,6 +430,8 @@ def _build_app(
     router = create_sessions_router(
         conversation_store=store,  # type: ignore[arg-type]
         agent_store=agent_store,  # type: ignore[arg-type]
+        auth_provider=auth_provider,
+        permission_store=permission_store,  # type: ignore[arg-type]
     )
     app = FastAPI()
 
@@ -735,26 +831,77 @@ async def test_fork_switch_binds_target_agent_bundle() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fork_switch_404_session_scoped_target() -> None:
-    """Switching to a session-scoped agent is rejected with 404.
+async def test_fork_switch_clones_readable_session_scoped_target() -> None:
+    """Switching to a readable session-scoped agent clones its bundle.
 
-    A session-scoped agent (``session_id`` set) belongs to one
-    conversation — possibly another user's. Binding it to a fork would
-    leak/alias it across sessions, so only built-in agents are bindable.
+    The selected target row is not rebound into the fork. It is used only
+    as the clone source after the caller proves read access to its owning
+    session.
     """
     conv = _make_conversation()
-    conv_store = _ConversationStore(conversations={"conv_src": conv})
-    client = TestClient(_build_app(conv_store, agent_store=_switch_agent_store()))
+    target_owner = _make_conversation("conv_other", agent_id="ag_session_scoped")
+    conv_store = _ConversationStore(conversations={"conv_src": conv, "conv_other": target_owner})
+    permission_store = _PermissionStore()
+    permission_store.grant("alice@example.com", "conv_src", LEVEL_OWNER)
+    permission_store.grant("alice@example.com", "conv_other", LEVEL_READ)
+    client = TestClient(
+        _build_app(
+            conv_store,
+            agent_store=_switch_agent_store(),
+            auth_provider=UnifiedAuthProvider(
+                source="header",
+                local_single_user=False,
+                header_name="X-Forwarded-Email",
+            ),
+            permission_store=permission_store,
+        )
+    )
 
     resp = client.post(
         "/v1/sessions/conv_src/fork",
         json={"agent_id": "ag_session_scoped"},
+        headers={"X-Forwarded-Email": "alice@example.com"},
+    )
+
+    assert resp.status_code == 201, (
+        f"Expected 201 for readable session-scoped target, got {resp.status_code}: {resp.text}"
+    )
+    fork_call = conv_store.fork_calls[0]
+    assert fork_call["cloned_agent_bundle_location"] == "ag_session_scoped/hash"
+    assert fork_call["cloned_agent_name"] == "scoped"
+    assert fork_call["agent_id"] != "ag_session_scoped"
+
+
+@pytest.mark.asyncio
+async def test_fork_switch_404_unreadable_session_scoped_target() -> None:
+    """Switching to an unreadable session-scoped target is rejected."""
+    conv = _make_conversation()
+    target_owner = _make_conversation("conv_other", agent_id="ag_session_scoped")
+    conv_store = _ConversationStore(conversations={"conv_src": conv, "conv_other": target_owner})
+    permission_store = _PermissionStore()
+    permission_store.grant("alice@example.com", "conv_src", LEVEL_OWNER)
+    client = TestClient(
+        _build_app(
+            conv_store,
+            agent_store=_switch_agent_store(),
+            auth_provider=UnifiedAuthProvider(
+                source="header",
+                local_single_user=False,
+                header_name="X-Forwarded-Email",
+            ),
+            permission_store=permission_store,
+        )
+    )
+
+    resp = client.post(
+        "/v1/sessions/conv_src/fork",
+        json={"agent_id": "ag_session_scoped"},
+        headers={"X-Forwarded-Email": "alice@example.com"},
     )
 
     assert resp.status_code == 404, (
-        f"Expected 404 for session-scoped target, got {resp.status_code}: {resp.text}"
+        f"Expected 404 for unreadable session-scoped target, got {resp.status_code}: {resp.text}"
     )
-    # No fork happened — the route rejected before cloning/forking.
     assert conv_store.fork_calls == []
 
 

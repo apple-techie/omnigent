@@ -1965,6 +1965,40 @@ async def test_filesystem_path_omits_absent_cursors(
 
 
 @pytest.mark.asyncio
+async def test_filesystem_path_missing_ok_converts_runner_404_to_empty_list(
+    client: httpx.AsyncClient,
+) -> None:
+    """`missing_ok=true` keeps old runners' 404 existence misses quiet."""
+    fake_runner = _FakeRunnerClient(
+        payload={"error": {"code": "path_not_found", "message": "Directory not found"}},
+        status_code=404,
+    )
+    set_runner_router(_FakeRunnerRouter(fake_runner))  # type: ignore[arg-type]
+
+    resp = await client.get(
+        "/v1/sessions/conv_proxy/resources/environments/default/filesystem/packages/admin"
+        "?limit=1000&order=asc&missing_ok=true",
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body == {
+        "object": "list",
+        "data": [],
+        "first_id": None,
+        "last_id": None,
+        "has_more": False,
+    }
+    assert fake_runner.calls == [
+        (
+            "GET",
+            "/v1/sessions/conv_proxy/resources/environments/default/filesystem/packages/admin"
+            "?limit=1000&order=asc&missing_ok=true",
+        ),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_filesystem_read_proxies_to_runner(
     client: httpx.AsyncClient,
 ) -> None:

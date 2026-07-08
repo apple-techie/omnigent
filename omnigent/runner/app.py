@@ -17014,6 +17014,7 @@ def create_runner_app(
         after: str | None = Query(default=None),
         before: str | None = Query(default=None),
         order: str = Query(default="desc", pattern="^(asc|desc)$"),
+        missing_ok: bool = Query(default=False),
     ) -> JSONResponse:
         """List the root directory of an environment.
 
@@ -17023,6 +17024,7 @@ def create_runner_app(
         :param after: Cursor entry id.
         :param before: Cursor entry id.
         :param order: Sort order.
+        :param missing_ok: When true, return an empty list for absent paths.
         :returns: PaginatedList of filesystem entries.
         """
         await _require_os_env(session_id)
@@ -17034,6 +17036,7 @@ def create_runner_app(
             after=after,
             before=before,
             order=order,
+            missing_ok=missing_ok,
         )
 
     @app.get("/v1/sessions/{session_id}/resources/environments/{environment_id}/search")
@@ -17306,6 +17309,7 @@ def create_runner_app(
         after: str | None = Query(default=None),
         before: str | None = Query(default=None),
         order: str = Query(default="desc", pattern="^(asc|desc)$"),
+        missing_ok: bool = Query(default=False),
     ) -> JSONResponse:
         """Read a file or list a directory in an environment.
 
@@ -17316,6 +17320,7 @@ def create_runner_app(
         :param after: Cursor entry id.
         :param before: Cursor entry id.
         :param order: Sort order.
+        :param missing_ok: When true, return an empty list for absent paths.
         :returns: File content or directory listing.
         """
         await _require_os_env(session_id)
@@ -17327,6 +17332,7 @@ def create_runner_app(
             after=after,
             before=before,
             order=order,
+            missing_ok=missing_ok,
         )
 
     @app.put(
@@ -17922,6 +17928,7 @@ def create_runner_app(
         after: str | None = None,
         before: str | None = None,
         order: str = "desc",
+        missing_ok: bool = False,
     ) -> JSONResponse:
         """Dispatch GET to list_dir or read depending on path type.
 
@@ -17938,11 +17945,15 @@ def create_runner_app(
         :param after: Cursor entry id for forward pagination.
         :param before: Cursor entry id for backward pagination.
         :param order: Sort order, ``"asc"`` or ``"desc"``.
+        :param missing_ok: When true, return an empty directory list for an
+            absent path instead of a 404. This is for UI existence probes;
+            normal file-browser reads leave it false.
         :returns: JSON response with directory listing or file content.
         """
         from omnigent.runner.environment_filesystem import (
             CallerProcessFilesystem,
         )
+        from omnigent.entities.environment_filesystem import FilesystemPathNotFound
 
         await _ensure_session_registered(session_id)
         agent_spec = await _resolve_session_agent_spec(session_id)
@@ -17975,7 +17986,21 @@ def create_runner_app(
                 },
             )
 
-        content = await fs.read(path)
+        try:
+            content = await fs.read(path)
+        except FilesystemPathNotFound:
+            if not missing_ok:
+                raise
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "object": "list",
+                    "data": [],
+                    "first_id": None,
+                    "last_id": None,
+                    "has_more": False,
+                },
+            )
         # Derive MIME type from the file path for syntax highlighting
         # and binary-vs-text rendering in UI clients.
         content_type_guess, _ = mimetypes.guess_type(path)

@@ -2829,6 +2829,22 @@ function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
   const [isCopied, setIsCopied] = useState(false);
   const copyTimeoutRef = useRef<number>(0);
 
+  const imagePlaceholder = (
+    img: Extract<MessageContentBlock, { type: "input_image" }>,
+    i: number,
+    fileId: string | null,
+  ) => (
+    <span
+      key={i}
+      className="flex items-center gap-1 rounded-full border border-border bg-muted px-2 py-0.5 text-xs text-muted-foreground"
+    >
+      <ImageIcon className="size-3 shrink-0" />
+      <span className="max-w-[180px] truncate">
+        {img.filename ?? fileId?.replace("pending:", "") ?? "image.png"}
+      </span>
+    </span>
+  );
+
   const handleCopy = async () => {
     if (!text || !navigator?.clipboard?.writeText) return;
     try {
@@ -2883,32 +2899,26 @@ function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
           {/* Inline image previews */}
           {images.length > 0 && (
             <div className="mb-1.5 flex flex-wrap gap-2">
-              {images.map((img, i) =>
-                img.file_id.startsWith("pending:") ? (
-                  // Upload in-flight — show a chip placeholder
-                  <span
-                    key={i}
-                    className="flex items-center gap-1 rounded-full border border-border bg-muted px-2 py-0.5 text-xs text-muted-foreground"
-                  >
-                    <ImageIcon className="size-3 shrink-0" />
-                    <span className="max-w-[180px] truncate">
-                      {img.filename ?? img.file_id.replace("pending:", "")}
-                    </span>
-                  </span>
-                ) : (
-                  // Uploaded — render the actual image
+              {images.map((img, i) => {
+                const fileId = typeof img.file_id === "string" ? img.file_id : null;
+                if (fileId === null || fileId.startsWith("pending:")) {
+                  // Upload in-flight, or a legacy/malformed stored image block with no file_id.
+                  return imagePlaceholder(img, i, fileId);
+                }
+                // Uploaded — render the actual image.
+                return (
                   <SessionImage
                     key={i}
                     path={
                       sessionId
-                        ? `/v1/sessions/${encodeURIComponent(sessionId)}/resources/files/${encodeURIComponent(img.file_id)}/content`
+                        ? `/v1/sessions/${encodeURIComponent(sessionId)}/resources/files/${encodeURIComponent(fileId)}/content`
                         : undefined
                     }
-                    alt={img.filename ?? img.file_id}
+                    alt={img.filename ?? fileId}
                     className="max-h-64 max-w-full rounded-md object-contain"
                   />
-                ),
-              )}
+                );
+              })}
             </div>
           )}
           {/* Non-image file chips */}
@@ -2920,7 +2930,9 @@ function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
                   className="flex items-center gap-1 rounded-full border border-border bg-muted px-2 py-0.5 text-xs text-muted-foreground"
                 >
                   <FileTextIcon className="size-3 shrink-0" />
-                  <span className="max-w-[180px] truncate">{att.filename ?? att.file_id}</span>
+                  <span className="max-w-[180px] truncate">
+                    {att.filename ?? att.file_id ?? "file"}
+                  </span>
                 </span>
               ))}
             </div>
@@ -4505,7 +4517,7 @@ export function Composer({
                 key={i}
                 className="flex items-center gap-1 rounded-full border border-border bg-muted px-2 py-0.5 text-xs text-muted-foreground"
               >
-                {file.type.startsWith("image/") ? (
+                {file.type?.startsWith("image/") ? (
                   <ImageIcon className="size-3 shrink-0" />
                 ) : (
                   <FileTextIcon className="size-3 shrink-0" />

@@ -81,7 +81,7 @@ function entry(name: string): HostFilesystemEntry {
   return { name, path: `/d/${name}`, type: "directory", bytes: null, modified_at: 0 };
 }
 
-function pageResponse(data: HostFilesystemEntry[], hasMore: boolean): Response {
+function pageResponse(data: unknown[], hasMore: boolean): Response {
   return {
     ok: true,
     status: 200,
@@ -173,6 +173,37 @@ describe("useHostFilesystem", () => {
     expect(result.current.data?.entries.map((e) => e.name)).toEqual(["a"]);
     expect(result.current.data?.truncated).toBe(false);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("drops malformed entries before returning data or advancing the cursor", async () => {
+    // WHY: host bridge/runtime bugs must not leak rows without string paths
+    // into UI code that renders with `entry.path.startsWith(...)`.
+    fetchMock
+      .mockResolvedValueOnce(
+        pageResponse(
+          [
+            { name: "bad-missing-path", type: "directory" },
+            { path: "/d/a", type: "directory" },
+            { path: "/d/file.txt", type: "file", bytes: "unknown", modified_at: "later" },
+          ],
+          true,
+        ),
+      )
+      .mockResolvedValueOnce(pageResponse([entry("b")], false));
+
+    const { result } = renderHook(() => useHostFilesystem("host_1", "/d"), {
+      wrapper: wrapper(),
+    });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data?.entries).toEqual([
+      { name: "a", path: "/d/a", type: "directory", bytes: null, modified_at: 0 },
+      { name: "file.txt", path: "/d/file.txt", type: "file", bytes: null, modified_at: 0 },
+      entry("b"),
+    ]);
+    expect(String(fetchMock.mock.calls[1][0])).toContain(
+      `after=${encodeURIComponent("/d/file.txt")}`,
+    );
   });
 
   it("throws a FetchError carrying the HTTP status on a non-OK response", async () => {

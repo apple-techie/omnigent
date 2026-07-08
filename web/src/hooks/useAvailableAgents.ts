@@ -41,6 +41,18 @@ export interface AvailableAgent {
   created_at?: number | null;
 }
 
+export function normalizeAgentSkills(skills: unknown): AvailableAgent["skills"] {
+  if (!Array.isArray(skills)) return [];
+  return skills.flatMap((skill) => {
+    if (typeof skill !== "object" || skill === null) return [];
+    const record = skill as Record<string, unknown>;
+    const name = record.name;
+    if (typeof name !== "string" || name.trim() === "") return [];
+    const description = record.description;
+    return [{ name, description: typeof description === "string" ? description : "" }];
+  });
+}
+
 const DISPLAY_NAMES: Record<string, string> = {
   // nessie is no longer seeded, but older deployments retain their row.
   nessie: "Nessie",
@@ -131,7 +143,7 @@ async function fetchBuiltinAgents(): Promise<AvailableAgent[]> {
     display_name: displayNameForAgent(a.name, a.harness),
     description: a.description ?? null,
     harness: a.harness ?? null,
-    skills: a.skills ?? [],
+    skills: normalizeAgentSkills(a.skills),
     // Raw passthrough (not coerced): an absent value stays undefined so
     // older servers degrade to "protected" and existing strict-equality
     // tests (which ignore undefined props) are unaffected.
@@ -224,7 +236,7 @@ async function enrichSessionAgent(scanned: ScannedSessionAgent): Promise<Availab
       display_name: displayNameForAgent(json.name, json.harness),
       description: json.description ?? null,
       harness: json.harness ?? null,
-      skills: json.skills ?? [],
+      skills: normalizeAgentSkills(json.skills),
     };
   } catch {
     // Network-level failure — same best-effort degradation as the

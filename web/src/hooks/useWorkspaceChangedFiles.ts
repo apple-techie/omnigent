@@ -415,7 +415,8 @@ async function fetchWorkspaceDirectory(
  * Keeps us from firing a directory listing for every backtick span (`git
  * status`, `useState`, `npm test`, …). A candidate must have a parent segment
  * before its first slash, not be absolute (the FileViewer rejects absolute
- * paths), not be a URL or carry a query/fragment, and not have whitespace
+ * paths), not be a URL or carry a query/fragment, not include a colon (usually
+ * a host/scheme qualifier like `mac-studio:~/...`), and not have whitespace
  * before its first slash (which marks a command like `git diff src/app`
  * rather than a path). Every slash-delimited segment must be non-empty and
  * not a `.`/`..` traversal segment (rejects `a/`, `a//b`, `../x`). Spaces
@@ -426,6 +427,7 @@ export function looksLikeWorkspaceFilePath(text: string): boolean {
   if (!text) return false;
   if (text.startsWith("/")) return false; // absolute paths are rejected by FileViewer
   if (text.includes("://")) return false; // URLs (http://, file://, …)
+  if (text.includes(":")) return false; // host/scheme-qualified spans are not workspace-relative
   if (text.includes("?") || text.includes("#")) return false; // query/fragment → not a plain path
   const slash = text.indexOf("/");
   if (slash <= 0) return false; // need a parent segment before the first slash
@@ -488,6 +490,10 @@ export function toWorkspaceRelativePath(
   if (!p.startsWith("/")) {
     // A leftover "~" means home-relative with no home to expand → unresolvable.
     if (p.startsWith("~")) return null;
+    // Inline terminal-style spans often carry a host qualifier
+    // (`mac-studio:~/...`, `ubuntu-root:/path`). Those are meaningful to a
+    // human but are not paths relative to this session's workspace root.
+    if (p.includes(":")) return null;
     return hasUnsafeSegments(p) ? null : p; // plain relative path
   }
   // Absolute: must live under the workspace root to be openable.
@@ -521,7 +527,9 @@ async function fetchDirEntriesTolerant(
   const base = `/v1/sessions/${encodeURIComponent(conversationId)}/resources/environments/${DEFAULT_ENVIRONMENT_ID}/filesystem`;
   const encodedPath = dirPath.split("/").map(encodeURIComponent).join("/");
   const res = await authenticatedFetch(
-    dirPath === "" ? `${base}?limit=1000&order=asc` : `${base}/${encodedPath}?limit=1000&order=asc`,
+    dirPath === ""
+      ? `${base}?limit=1000&order=asc&missing_ok=true`
+      : `${base}/${encodedPath}?limit=1000&order=asc&missing_ok=true`,
   );
   // 404 = the directory (or the whole OS environment) is absent, so the file
   // can't exist. Degrade to "no entries" rather than surfacing an error.

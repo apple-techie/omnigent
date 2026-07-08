@@ -646,6 +646,8 @@ describe("looksLikeWorkspaceFilePath", () => {
     ["git diff src/app", false, "whitespace before the first slash → command, not a path"],
     ["a/b?c=d", false, "query string → not a plain path"],
     ["a/b#frag", false, "fragment → not a plain path"],
+    ["mac-studio:~/.cloudflared/config.yml", false, "host-qualified home path"],
+    ["ubuntu-root:/srv/app/config.yml", false, "host-qualified absolute path"],
     ["/etc/hosts", false, "absolute path (FileViewer rejects these)"],
     ["https://example.com/x", false, "URL"],
     ["file://a/b", false, "URL scheme"],
@@ -691,6 +693,8 @@ describe("toWorkspaceRelativePath", () => {
     ["/home/u/ws/foo.md#L12", ROOT, HOME, null, "absolute with #fragment → unresolvable"],
     ["/home/u/ws/foo.md?x=1", ROOT, HOME, null, "absolute with ?query → unresolvable"],
     ["https://example.com/x", ROOT, HOME, null, "URL → unresolvable"],
+    ["mac-studio:~/ws/foo.md", ROOT, HOME, null, "host-qualified tilde path → unresolvable"],
+    ["ubuntu-root:/home/u/ws/foo.md", ROOT, HOME, null, "host-qualified absolute path → unresolvable"],
   ])("%o (root=%o, home=%o) → %o (%s)", (text, root, home, expected, _why) => {
     expect(
       toWorkspaceRelativePath(text as string, root as string | null, home as string | null),
@@ -763,6 +767,7 @@ describe("useWorkspaceFileExists", () => {
     expect(fetchMock.mock.calls[0][0]).toContain(
       "/resources/environments/default/filesystem/projects/out?",
     );
+    expect(fetchMock.mock.calls[0][0]).toContain("missing_ok=true");
   });
 
   it("reports false when the file is absent from the parent listing", async () => {
