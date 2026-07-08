@@ -17966,10 +17966,10 @@ def create_runner_app(
             normal file-browser reads leave it false.
         :returns: JSON response with directory listing or file content.
         """
+        from omnigent.entities.environment_filesystem import FilesystemPathNotFound
         from omnigent.runner.environment_filesystem import (
             CallerProcessFilesystem,
         )
-        from omnigent.entities.environment_filesystem import FilesystemPathNotFound
 
         await _ensure_session_registered(session_id)
         agent_spec = await _resolve_session_agent_spec(session_id)

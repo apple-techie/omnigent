@@ -13169,9 +13169,7 @@ async def _handle_advise_models_mcp(
                     # static table; let the dispatcher use that worker's default
                     # or surface no recommendation.
                     candidates = (
-                        _runner_catalog.get(agent)
-                        or _runner_catalog.get(harness_key)
-                        or []
+                        _runner_catalog.get(agent) or _runner_catalog.get(harness_key) or []
                     )
                 else:
                     candidates = infer_models(harness_key) or []

@@ -8,7 +8,10 @@ import { useAvailableAgents } from "@/hooks/useAvailableAgents";
 import { useSessionAgent } from "@/hooks/useAgents";
 
 vi.mock("@/lib/sessionsApi", () => ({ switchSessionAgent: vi.fn() }));
-vi.mock("@/hooks/useAvailableAgents", () => ({ useAvailableAgents: vi.fn() }));
+vi.mock("@/hooks/useAvailableAgents", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/hooks/useAvailableAgents")>()),
+  useAvailableAgents: vi.fn(),
+}));
 vi.mock("@/hooks/useAgents", () => ({ useSessionAgent: vi.fn() }));
 
 const switchSessionAgentMock = vi.mocked(switchSessionAgent);

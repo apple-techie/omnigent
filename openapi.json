@@ -9476,6 +9476,17 @@
               "title": "Order",
               "type": "string"
             }
+          },
+          {
+            "description": "When true, return an empty list for absent paths.",
+            "in": "query",
+            "name": "missing_ok",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Missing Ok",
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
@@ -9656,6 +9667,17 @@
               "pattern": "^(asc|desc)$",
               "title": "Order",
               "type": "string"
+            }
+          },
+          {
+            "description": "When true, return an empty list for absent paths.",
+            "in": "query",
+            "name": "missing_ok",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Missing Ok",
+              "type": "boolean"
             }
           }
         ],
@@ -10621,7 +10643,7 @@
     },
     "/v1/sessions/{session_id}/switch-agent": {
       "post": {
-        "description": "Switch an existing session in place to a different agent/harness.\n\nUnlike fork, this keeps the SAME session \u2014 transcript, comments,\nfiles, host, and workspace are untouched; only the agent/harness\nchanges. The current session-scoped agent is replaced by a clone\nof the target built-in, model settings carry over only within the\nsame provider family (a model id is provider-bound), the native\nruntime session id is cleared, and the harness-presentation labels\nare recomputed for the target. The next turn cold-starts the new\nharness (rebuilding the native transcript from this session's own\nitems for a same-family native target). Only built-in agents are\nbindable, and only while the session is idle.\n\n**Parameters**\n\n- `body` \u2014 The validated `SessionSwitchAgentRequest`.\n\n**Returns:** A `SessionResponse` describing the session after the switch (status `\"idle\"`).\n\n**Raises**\n\n- `OmnigentError` \u2014 404 if the session or target agent does not exist or the target is not a bindable built-in; 403 if the caller lacks edit access; 400 if the session is a sub-agent, has no agent binding, or the target bundle can't be loaded; 409 if a turn is currently running.",
+        "description": "Switch an existing session in place to a different agent/harness.\n\nUnlike fork, this keeps the SAME session \u2014 transcript, comments,\nfiles, host, and workspace are untouched; only the agent/harness\nchanges. The current session-scoped agent is replaced by a clone\nof the target agent's bundle, model settings carry over only\nwithin the same provider family (a model id is provider-bound),\nthe native runtime session id is cleared, and the\nharness-presentation labels are recomputed for the target. The\nnext turn cold-starts the new harness (rebuilding the native\ntranscript from this session's own items for a same-family native\ntarget). Template agents are cloneable; session-scoped targets\nare cloneable only when the caller can read their owning session.\nSwitching is allowed only while the session is idle.\n\n**Parameters**\n\n- `body` \u2014 The validated `SessionSwitchAgentRequest`.\n\n**Returns:** A `SessionResponse` describing the session after the switch (status `\"idle\"`).\n\n**Raises**\n\n- `OmnigentError` \u2014 404 if the session or target agent does not exist or the target is not cloneable; 403 if the caller lacks edit access; 400 if the session is a sub-agent, has no agent binding, or the target bundle can't be loaded; 409 if a turn is currently running.",
         "operationId": "switch_session_agent_v1_sessions__session_id__switch_agent_post",
         "parameters": [
           {
@@ -10675,7 +10697,7 @@
     },
     "/v1/sessions/{source_id}/fork": {
       "post": {
-        "description": "Fork an existing session into a new session.\n\nDeep-copies the source session's conversation items and\nclones the agent into a new session. When `body.agent_id`\nis set, the fork binds that built-in agent instead of the\nsource's \u2014 switching harness (e.g. Claude-SDK \u2192 Claude Code,\nor Claude \u2192 Codex). The source's model settings carry over\nonly within the same provider family; a same-family native\ntarget also carries conversation history (the runner rebuilds\nits transcript). The REPL/CLI binds the fork to its runner via\n`PATCH /v1/sessions/{id}` after creation.\n\nWhen `body.up_to_response_id` is set, only history up to and\nincluding that response is copied into the fork (a \"fork from\nthis response\"); a native target then rebuilds its transcript\nfrom the truncated items instead of resuming the source's full\nnative transcript.\n\n**Parameters**\n\n- `body` \u2014 The validated `SessionForkRequest`.\n\n**Returns:** A `SessionResponse` describing the newly created fork (status `\"idle\"`).\n\n**Raises**\n\n- `OmnigentError` \u2014 404 if *source_id* does not exist or `body.agent_id` is not a bindable built-in agent; 403 if the caller lacks read access; 400 if the source is a sub-agent session, has no agent binding, or `body.up_to_response_id` names no response in the source session.",
+        "description": "Fork an existing session into a new session.\n\nDeep-copies the source session's conversation items and\nclones the agent into a new session. When `body.agent_id`\nis set, the fork clones that target agent's bundle instead of\nthe source's \u2014 switching harness (e.g. Claude-SDK \u2192 Claude\nCode, or Claude \u2192 Codex). Template agents are cloneable; a\nsession-scoped target is cloneable only when the caller can\nread its owning session. The source's model settings carry\nover only within the same provider family; a same-family\nnative target also carries conversation history (the runner\nrebuilds its transcript). The REPL/CLI binds the fork to its\nrunner via `PATCH /v1/sessions/{id}` after creation.\n\nWhen `body.up_to_response_id` is set, only history up to and\nincluding that response is copied into the fork (a \"fork from\nthis response\"); a native target then rebuilds its transcript\nfrom the truncated items instead of resuming the source's full\nnative transcript.\n\n**Parameters**\n\n- `body` \u2014 The validated `SessionForkRequest`.\n\n**Returns:** A `SessionResponse` describing the newly created fork (status `\"idle\"`).\n\n**Raises**\n\n- `OmnigentError` \u2014 404 if *source_id* does not exist or `body.agent_id` is not a cloneable target; 403 if the caller lacks read access; 400 if the source is a sub-agent session, has no agent binding, or `body.up_to_response_id` names no response in the source session.",
         "operationId": "fork_session_v1_sessions__source_id__fork_post",
         "parameters": [
           {
