@@ -33,6 +33,10 @@ groups.
 
 from __future__ import annotations
 
+import json
+import re
+import time
+
 from playwright.sync_api import Page, expect
 
 # Records constructed notifications and makes visibility/focus controllable
@@ -146,6 +150,29 @@ Object.defineProperty(document, "hidden", {
   get() { return window.__hidden; },
 });
 document.hasFocus = function () { return !window.__hidden; };
+"""
+
+_NATIVE_NOTIFICATION_INIT_SCRIPT = """
+window.__nativeNotifs = [];
+window.__badgeCounts = [];
+window.__nativeNotificationHandlers = [];
+window.omnigentDesktop = {
+  kind: "electron",
+  setBadgeCount: function (count) {
+    window.__badgeCounts.push(count);
+  },
+  notify: function (params) {
+    window.__nativeNotifs.push(params || {});
+    return Promise.resolve(true);
+  },
+  onNotificationActivated: function (callback) {
+    window.__nativeNotificationHandlers.push(callback);
+    return function () {};
+  },
+  getServerPicker: function () { return Promise.resolve(null); },
+  switchServer: function () { return Promise.resolve(); },
+  openServerSetup: function () {},
+};
 """
 
 # Kept deliberately tiny: these tests only need a real ``running`` ->
@@ -317,6 +344,109 @@ def test_idle_notification_suppressed_when_foreground(
     # notification slips through.
     page.wait_for_timeout(3_000)
     assert page.evaluate("window.__notifs.length") == 0, "foreground transition must not notify"
+
+
+def test_idle_notification_uses_electron_native_bridge(
+    page: Page,
+    seeded_session: tuple[str, str],
+) -> None:
+    """
+    Under the Electron shell bridge, a settled background turn-end is sent to
+    ``window.omnigentDesktop.notify`` with a click navigation path, not to the
+    browser ``Notification`` constructor.
+
+    This covers the desktop notification flow that differs from a plain browser:
+    the web bundle detects the injected native bridge, skips browser permission
+    gating, forwards ``navigatePath`` over IPC, and lets the shell own the OS
+    toast.
+
+    The status transition is deterministic: the initial ``GET /v1/sessions``
+    response seeds a running row, then the mocked ``WS /v1/sessions/updates``
+    sends a normal ``changed`` frame that flips the same row idle. That is the
+    production cache path ``useIdleNotifications`` observes, without depending
+    on a live model turn.
+    """
+    base_url, session_id = seeded_session
+    title = "Electron native notification e2e"
+    created_at = int(time.time())
+    sockets = []
+    watched_messages = []
+
+    def conversation(status: str, updated_at: int) -> dict:
+        return {
+            "id": session_id,
+            "object": "conversation",
+            "title": title,
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "labels": {},
+            "permission_level": 3,
+            "pending_elicitations_count": 0,
+            "status": status,
+            "runner_online": True,
+        }
+
+    def fulfill_json(route, body: dict) -> None:
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+
+    page.add_init_script(_HARNESS_INIT_SCRIPT + _NATIVE_NOTIFICATION_INIT_SCRIPT)
+    page.route(
+        re.compile(r"/v1/sessions(\?.*)?$"),
+        lambda route: fulfill_json(
+            route,
+            {
+                "data": [conversation("running", created_at)],
+                "first_id": session_id,
+                "last_id": session_id,
+                "has_more": False,
+            },
+        ),
+    )
+
+    def handle_updates_socket(ws) -> None:
+        sockets.append(ws)
+        ws.on_message(lambda message: watched_messages.append(message))
+
+    page.route_web_socket(re.compile(r"/v1/sessions/updates"), handle_updates_socket)
+    page.goto(base_url)
+    expect(page.get_by_text(title)).to_be_visible(timeout=30_000)
+
+    page.evaluate(
+        "window.__hidden = true;"
+        "document.dispatchEvent(new Event('visibilitychange'));"
+        "window.dispatchEvent(new Event('blur'));"
+    )
+    page.wait_for_function("window.__sessionStatuses.length > 0", timeout=10_000)
+    assert sockets, "session updates WebSocket did not open"
+    deadline = time.time() + 5
+    while time.time() < deadline and not any(
+        session_id in str(message) for message in watched_messages
+    ):
+        page.wait_for_timeout(100)
+    assert any(session_id in str(message) for message in watched_messages), (
+        f"session updates WebSocket did not receive a watch for {session_id}: {watched_messages}"
+    )
+    sockets[0].send(
+        json.dumps(
+            {
+                "type": "changed",
+                "items": [conversation("idle", created_at)],
+            }
+        )
+    )
+
+    page.wait_for_function("window.__nativeNotifs.length > 0", timeout=30_000)
+    page.wait_for_timeout(3_000)
+
+    native_notifs = page.evaluate("window.__nativeNotifs")
+    assert len(native_notifs) == 1, f"expected one native notification, got {native_notifs}"
+    first = native_notifs[0]
+    assert first["title"] == title, native_notifs
+    assert first["navigatePath"] == f"/c/{session_id}", native_notifs
+    assert isinstance(first.get("body"), str) and first["body"].strip(), native_notifs
+    assert page.evaluate("window.__notifs.length") == 0, (
+        "Electron native shell should not also construct a browser Notification"
+    )
 
 
 def test_idle_notification_click_navigates_to_chat(
