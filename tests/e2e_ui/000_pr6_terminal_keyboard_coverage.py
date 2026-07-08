@@ -16,6 +16,9 @@ of the judge input:
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 from playwright.sync_api import Page
 
 from tests.e2e_ui.sessions.test_code_font import (
@@ -30,6 +33,31 @@ from tests.e2e_ui.sessions.test_keyboard_shortcuts_dialog import (
 from tests.e2e_ui.sessions.test_terminal_theme import (
     test_dark_terminal_under_light_app as _terminal_theme_live_update,
 )
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _live_js(source: str) -> str:
+    """Return JavaScript source with comments removed for live-code assertions."""
+    without_blocks = re.sub(r"/\*[\s\S]*?\*/", "", source)
+    return re.sub(r"(^|[^:])//.*$", r"\1", without_blocks, flags=re.MULTILINE)
+
+
+def test_pr6_electron_notification_sound_menu_wiring() -> None:
+    """Covers Electron notification sound/menu behavior added in main.js."""
+    main_js = _live_js((_REPO_ROOT / "web/electron/src/main.js").read_text())
+
+    assert 'label: "Notifications"' in main_js
+    assert 'id: "notification_sound_enabled"' in main_js
+    assert 'label: "Play Notification Sound"' in main_js
+    assert "settings.notification_sound_enabled = item.checked" in main_js
+    assert "settings.notification_sound_name = name" in main_js
+    assert "playSystemSound(name)" in main_js
+
+    assert 'execFile("afplay", [file]' in main_js
+    assert "silent: isMac ? true : !soundOn" in main_js
+    assert "shouldPlayNotificationSound(navigatePath || title)" in main_js
+    assert "playSystemSound(currentNotificationSoundName())" in main_js
 
 
 def test_pr6_terminal_control_transport_and_selection(
