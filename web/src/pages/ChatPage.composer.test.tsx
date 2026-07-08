@@ -33,7 +33,6 @@ vi.mock("@/lib/agentLabels", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/agentLabels")>()),
   useBrainHarnessLabels: () => ({
     "claude-sdk": "Claude SDK",
-    "openai-agents": "OpenAI Agents SDK",
     codex: "Codex",
     cursor: "Cursor",
     pi: "Pi",
@@ -1186,5 +1185,40 @@ describe("Composer sub-agent tray", () => {
     // that some tray exists.
     expect(screen.getByText("check-account-eligibility")).toBeTruthy();
     expect(screen.getByText(/Chatting with sub-agent/)).toBeTruthy();
+  });
+});
+
+describe("Composer — queued-message flush gating", () => {
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+    useChatStore.setState({ queuedMessages: [] });
+  });
+
+  // Regression (Polly review 3a): the level-triggered flush effect must NOT
+  // drain the queue while the session is unreachable — flushing would POST
+  // into a void, bypassing onSend's reconnect dialog. It must drain once
+  // reachable again.
+  it("holds the queue while unreachable, then flushes when reachable", async () => {
+    const sendSpy = vi.fn().mockResolvedValue(undefined);
+    useChatStore.setState({
+      conversationId: "conv_test",
+      boundAgentId: "agent_xyz",
+      status: "idle",
+      sessionStatus: "idle",
+      send: sendSpy,
+      queuedMessages: [{ queueId: "q_1", text: "held", conversationId: "conv_test" }],
+    });
+
+    // Idle + a waiting head, but unreachable → the effect must not flush.
+    const { rerender } = render(<Composer {...composerProps({ unreachable: true })} />);
+    await waitFor(() => expect(sendSpy).not.toHaveBeenCalled());
+    expect(useChatStore.getState().queuedMessages).toHaveLength(1);
+
+    // Becomes reachable → the effect re-fires and drains the head.
+    rerender(<Composer {...composerProps({ unreachable: false })} />);
+    await waitFor(() => expect(sendSpy).toHaveBeenCalledTimes(1));
+    expect(sendSpy.mock.calls[0]!.slice(0, 2)).toEqual(["held", "agent_xyz"]);
+    expect(useChatStore.getState().queuedMessages).toHaveLength(0);
   });
 });

@@ -58,6 +58,9 @@ vi.mock("@/hooks/useHostFilesystem", () => ({
   // an idle mutation keeps it inert for these tests.
   useCreateHostDirectory: () => ({ mutateAsync: vi.fn(), isPending: false }),
 }));
+vi.mock("@/hooks/useHostWorktrees", () => ({
+  useHostWorktrees: () => ({ data: undefined }),
+}));
 // No other sessions in scope — keep the conflict hooks inert so they don't
 // issue their own /health fetch or surface a warning. The warning is covered
 // in NewChatDialog.test.tsx.
@@ -80,7 +83,6 @@ vi.mock("@/lib/agentLabels", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/agentLabels")>()),
   useBrainHarnessLabels: () => ({
     "claude-sdk": "Claude SDK",
-    "openai-agents": "OpenAI Agents SDK",
     codex: "Codex",
     cursor: "Cursor",
     pi: "Pi",

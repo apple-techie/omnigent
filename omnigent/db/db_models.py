@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import contextlib
+from collections.abc import Iterator
+from contextvars import ContextVar
+
 from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
     Float,
-    ForeignKey,
     Index,
     Integer,
     String,
@@ -22,6 +25,57 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 class Base(DeclarativeBase):
     """Shared declarative base for all omnigent tables."""
+
+
+# Default workspace id stamped on every row and used as the leading
+# member of every composite primary key. 0 is the single-workspace /
+# unassigned sentinel: with no workspace bound to the request, all rows
+# live in workspace 0.
+DEFAULT_WORKSPACE_ID = 0
+
+# Ambient per-request workspace id. Stores are process-wide singletons, so
+# the active workspace can't ride on the store instance — it lives here.
+# OSS leaves this at the default (single-workspace 0); a multi-tenant
+# deployment (e.g. universe) sets it per request from the authenticated
+# context (via ``workspace_scope`` in middleware). Reads and inserts
+# resolve it through ``current_workspace_id()`` so the same store code
+# scopes to the caller's workspace without threading the id through every
+# signature — keeping this file byte-identical across deployments.
+_current_workspace_id: ContextVar[int] = ContextVar(
+    "omnigent_workspace_id", default=DEFAULT_WORKSPACE_ID
+)
+
+
+def current_workspace_id() -> int:
+    """Return the workspace id bound to the active request/context.
+
+    Defaults to :data:`DEFAULT_WORKSPACE_ID` (0) — the single-workspace OSS
+    deployment. Multi-tenant deployments set it per request so every
+    primary-key lookup, filter, and insert scopes to that workspace.
+    """
+    return _current_workspace_id.get()
+
+
+@contextlib.contextmanager
+def workspace_scope(workspace_id: int) -> Iterator[None]:
+    """Bind *workspace_id* for the duration of the ``with`` block.
+
+    Used by multi-tenant request middleware (and tests) to scope all
+    store access to one workspace; resets to the prior value on exit so
+    nested / concurrent contexts don't leak.
+    """
+    token = _current_workspace_id.set(workspace_id)
+    try:
+        yield
+    finally:
+        _current_workspace_id.reset(token)
+
+
+AGENT_KIND_TEMPLATE = "template"
+AGENT_KIND_SESSION = "session"
+
+POLICY_SCOPE_DEFAULT = "default"
+POLICY_SCOPE_SESSION = "session"
 
 
 class SqlAgent(Base):
@@ -40,40 +94,45 @@ class SqlAgent(Base):
         ``"ag_abc123/a1b2c3d4e5f6..."``.
     :param version: Monotonic version counter. Starts at 1, incremented
         on each update via ``PUT /api/agents/{id}``.
+    :param kind: ``"template"`` for server-wide registered agents;
+        ``"session"`` for per-conversation copies.
     :param description: Optional free-text description of the agent's
         purpose. ``None`` when not provided.
     :param updated_at: Unix epoch seconds of the last update, or
         ``None`` if the agent has never been updated.
-    :param session_id: Owning conversation/session id for a
-        session-scoped agent. ``None`` for template agents uploaded
-        through ``POST /api/agents``.
     """
 
     __tablename__ = "agents"
 
+    # Tenant partition key: Databricks workspace id owning this row (0 = default). Part of the PK.
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     created_at: Mapped[int] = mapped_column(Integer)
     name: Mapped[str] = mapped_column(String(256))
     bundle_location: Mapped[str] = mapped_column(String(512))
     version: Mapped[int] = mapped_column(Integer, default=1)
+    kind: Mapped[str] = mapped_column(String(16))
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    session_id: Mapped[str | None] = mapped_column(
-        String(64),
-        ForeignKey("conversations.id", ondelete="CASCADE"),
-        nullable=True,
-    )
 
     __table_args__ = (
         Index("ix_agents_created_at", "created_at"),
+        # Template agents have unique names; session-scoped agents (kind='session')
+        # may reuse the same name across conversations. The partial index enforces
+        # uniqueness only within the template set.
         Index(
             "ix_agents_template_name",
             "name",
             unique=True,
-            sqlite_where=text("session_id IS NULL"),
-            postgresql_where=text("session_id IS NULL"),
+            sqlite_where=text("kind = 'template'"),
+            postgresql_where=text("kind = 'template'"),
         ),
-        Index("ix_agents_session_id", "session_id", unique=True),
     )
 
 
@@ -95,6 +154,14 @@ class SqlFile(Base):
 
     __tablename__ = "files"
 
+    # Tenant partition key: Databricks workspace id owning this row (0 = default). Part of the PK.
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     created_at: Mapped[int] = mapped_column(Integer)
     filename: Mapped[str] = mapped_column(String(512))
@@ -135,6 +202,14 @@ class SqlUser(Base):
 
     __tablename__ = "users"
 
+    # Tenant partition key: Databricks workspace id owning this row (0 = default). Part of the PK.
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=false())
     password_hash: Mapped[str | None] = mapped_column(String(256), nullable=True)
@@ -177,6 +252,14 @@ class SqlAccountToken(Base):
 
     __tablename__ = "account_tokens"
 
+    # Tenant partition key: Databricks workspace id owning this row (0 = default). Part of the PK.
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
     kind: Mapped[str] = mapped_column(String(16), nullable=False)
     user_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -215,14 +298,20 @@ class SqlSessionPermission(Base):
 
     __tablename__ = "session_permissions"
 
+    # Tenant partition key: Databricks workspace id owning this row (0 = default). Part of the PK.
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
     user_id: Mapped[str] = mapped_column(
         String(128),
-        ForeignKey("users.id", ondelete="CASCADE"),
         primary_key=True,
     )
     conversation_id: Mapped[str] = mapped_column(
         String(64),
-        ForeignKey("conversations.id", ondelete="CASCADE"),
         primary_key=True,
     )
     level: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -312,6 +401,14 @@ class SqlConversation(Base):
 
     __tablename__ = "conversations"
 
+    # Tenant partition key: Databricks workspace id owning this row (0 = default). Part of the PK.
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     created_at: Mapped[int] = mapped_column(Integer)
     updated_at: Mapped[int] = mapped_column(Integer)
@@ -319,29 +416,23 @@ class SqlConversation(Base):
     kind: Mapped[str] = mapped_column(String(32), default="default")
     parent_conversation_id: Mapped[str | None] = mapped_column(
         String(64),
-        ForeignKey("conversations.id", ondelete="CASCADE"),
         nullable=True,
     )
     root_conversation_id: Mapped[str] = mapped_column(
         String(64),
-        ForeignKey("conversations.id", ondelete="CASCADE"),
         nullable=False,
     )
     agent_id: Mapped[str | None] = mapped_column(
         String(64),
-        ForeignKey("agents.id", ondelete="CASCADE"),
         nullable=True,
     )
     runner_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # Host that launched (or should launch) the runner for this
     # session. Set when a session is created via the Web UI on a
-    # specific host. FK to hosts.host_id (a unique column); ON DELETE
-    # SET NULL so removing a host clears the binding rather than
-    # orphaning it — and host_id -> NULL keeps the
-    # workspace-required CHECK below satisfied.
+    # specific host. No FK: host records are managed outside this
+    # table; deletion is handled explicitly by the application.
     host_id: Mapped[str | None] = mapped_column(
         String(64),
-        ForeignKey("hosts.host_id", ondelete="SET NULL"),
         nullable=True,
     )
     # Per-session reasoning-effort hint, e.g. "high". Nullable;
@@ -421,6 +512,8 @@ class SqlConversation(Base):
         # Reconnect reconciliation queries conversations by host_id on
         # every host reconnect; index it to avoid a full scan.
         Index("ix_conversations_host_id", "host_id"),
+        # Agent lookups: find the conversation(s) that own a given agent.
+        Index("ix_conversations_agent_id", "agent_id"),
         Index("ix_conversations_root_conversation_id", "root_conversation_id"),
         # Phase 4: partial unique index on (parent_conversation_id,
         # title) prevents two same-named children under the same
@@ -480,9 +573,17 @@ class SqlConversationItem(Base):
 
     __tablename__ = "conversation_items"
 
+    # Tenant partition key: Databricks workspace id owning this row (0 = default). Part of the PK.
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     conversation_id: Mapped[str] = mapped_column(
-        String(64), ForeignKey("conversations.id", ondelete="CASCADE")
+        String(64),
     )
     response_id: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[int] = mapped_column(Integer)
@@ -542,9 +643,16 @@ class SqlConversationLabel(Base):
 
     __tablename__ = "conversation_labels"
 
+    # Tenant partition key: Databricks workspace id owning this row (0 = default). Part of the PK.
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
     conversation_id: Mapped[str] = mapped_column(
         String(64),
-        ForeignKey("conversations.id", ondelete="CASCADE"),
         primary_key=True,
     )
     key: Mapped[str] = mapped_column(String(128), primary_key=True)
@@ -590,6 +698,14 @@ class SqlComment(Base):
 
     __tablename__ = "comments"
 
+    # Tenant partition key: Databricks workspace id owning this row (0 = default). Part of the PK.
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     conversation_id: Mapped[str] = mapped_column(String(64))
     path: Mapped[str] = mapped_column(String(4096))
@@ -639,6 +755,10 @@ class SqlPolicy(Base):
         the handler is a direct callable or for ``type="url"``.
     :param enabled: Whether the engine consults this row.
         Defaults to true.
+    :param scope: ``"default"`` for server-wide policies;
+        ``"session"`` for session-scoped policies. Explicit
+        discriminator so queries filter by column value instead
+        of checking ``session_id IS NULL``.
     :param created_by: User ID of the admin who created this
         policy. ``None`` in single-user mode or for
         session-scoped policies.
@@ -646,12 +766,19 @@ class SqlPolicy(Base):
 
     __tablename__ = "policies"
 
+    # Tenant partition key: Databricks workspace id owning this row (0 = default). Part of the PK.
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     name: Mapped[str] = mapped_column(String(256))
     # Nullable: NULL for server-wide default policies.
     session_id: Mapped[str | None] = mapped_column(
         String(64),
-        ForeignKey("conversations.id", ondelete="CASCADE"),
         nullable=True,
     )
     created_at: Mapped[int] = mapped_column(Integer)
@@ -666,12 +793,26 @@ class SqlPolicy(Base):
     # FunctionRef.arguments pattern.
     factory_params: Mapped[str | None] = mapped_column(Text, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, server_default=true())
+    # "default" for server-wide policies; "session" for per-conversation
+    # copies. Mirrors the agents.kind pattern so queries filter by column
+    # value rather than session_id IS NULL.
+    scope: Mapped[str] = mapped_column(String(16))
     created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     __table_args__ = (
         Index("ix_policies_created_at", "created_at"),
         Index("ix_policies_session_id", "session_id"),
         UniqueConstraint("session_id", "name", name="uq_policies_session_id_name"),
+        # Default policies must have unique names; session-scoped policies
+        # may reuse the same name across conversations. Mirrors
+        # ix_agents_template_name scoping to the 'default' set.
+        Index(
+            "ix_policies_default_name",
+            "name",
+            unique=True,
+            sqlite_where=text("scope = 'default'"),
+            postgresql_where=text("scope = 'default'"),
+        ),
     )
 
 
@@ -727,6 +868,14 @@ class SqlHost(Base):
 
     __tablename__ = "hosts"
 
+    # Tenant partition key: Databricks workspace id owning this row (0 = default). Part of the PK.
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
     owner: Mapped[str] = mapped_column(String(256), primary_key=True)
     name: Mapped[str] = mapped_column(String(256), primary_key=True)
     host_id: Mapped[str] = mapped_column(String(64))
@@ -788,6 +937,14 @@ class SqlUserDailyCost(Base):
 
     __tablename__ = "user_daily_cost"
 
+    # Tenant partition key: Databricks workspace id owning this row (0 = default). Part of the PK.
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
     user_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     day_utc: Mapped[str] = mapped_column(String(10), primary_key=True)
     cost_usd: Mapped[float] = mapped_column(Float, nullable=False)

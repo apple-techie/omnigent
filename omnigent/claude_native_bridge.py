@@ -124,6 +124,10 @@ _TMUX_SEND_TIMEOUT_S = 5.0
 # The glyph persists while Claude is busy responding, so its presence
 # means "input box mounted" (not "idle"), which is what injection needs.
 _CLAUDE_PROMPT_GLYPH = "❯"
+# Box-drawing glyphs Claude Code's input-box frame is made of. A line of
+# these below ``❯`` marks the live input box (see ``_is_box_rule``),
+# distinguishing it from a bare prompt echoed into scrollback.
+_BOX_RULE_CHARS = frozenset("─━╭╮╰╯│┃╌╍")
 # How many trailing non-empty lines to scan for the prompt glyph. The
 # input box sits near the bottom of the pane; scanning only the tail
 # avoids false positives from the glyph appearing in scrollback output.
@@ -2831,11 +2835,48 @@ def _claude_prompt_rendered(pane: str) -> bool:
     positives from the glyph appearing in scrollback (e.g. echoed in a
     prior response), since the live input box always sits at the bottom.
 
+    A mid-turn injection grows the footer with running-state rows (a
+    ``○ Explore …`` subagent line, extra spinners) that can push ``❯``
+    past that window — arbitrarily far, since a subagent fan-out adds one
+    row per concurrent subagent. To reach it at any depth without also
+    matching a scrollback echo, a glyph above the window counts only when
+    it's framed by a box rule — the ``────`` closing line the live input
+    box always renders below ``❯`` but a bare echoed prompt never has.
+
     :param pane: Captured pane text from :func:`_capture_pane`.
     :returns: ``True`` when the input box appears mounted.
     """
     non_empty = [line for line in pane.splitlines() if line.strip()]
-    return any(_CLAUDE_PROMPT_GLYPH in line for line in non_empty[-_PROMPT_SCAN_TAIL_LINES:])
+    if any(_CLAUDE_PROMPT_GLYPH in line for line in non_empty[-_PROMPT_SCAN_TAIL_LINES:]):
+        return True
+    # Above that window, trust the glyph only when a box rule sits below
+    # it — the live input box's closing frame, absent from scrollback.
+    # The footer height scales with concurrent subagents (a fan-out of
+    # ``○ Explore …`` rows), so no fixed window can bound it; the box rule
+    # is a reliable structural signal at any depth, and `capture-pane -p`
+    # returns only the visible pane, so this stays within one screen.
+    for idx, line in enumerate(non_empty):
+        if _CLAUDE_PROMPT_GLYPH not in line:
+            continue
+        if any(_is_box_rule(rule) for rule in non_empty[idx + 1 :]):
+            return True
+    return False
+
+
+def _is_box_rule(line: str) -> bool:
+    """
+    Return whether a line is a TUI box-drawing horizontal rule.
+
+    Claude Code frames its input box with rows of ``─`` (plus corner
+    glyphs). Such a rule below ``❯`` marks the live input box, letting
+    the readiness scan reach a prompt buried under a tall running-turn
+    footer without matching a bare ``❯`` echoed into scrollback.
+
+    :param line: A single pane line, e.g. ``"──────────"``.
+    :returns: ``True`` when the line is predominantly box-rule glyphs.
+    """
+    stripped = line.strip()
+    return len(stripped) >= 3 and all(ch in _BOX_RULE_CHARS for ch in stripped)
 
 
 def _submit_needle(content: str) -> str:

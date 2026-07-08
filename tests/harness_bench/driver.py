@@ -29,6 +29,19 @@ from omnigent.runtime.harnesses.process_manager import HarnessProcessManager
 from tests.e2e._harness_probes import cli_unavailable_reason
 from tests.harness_bench.profile import BenchProfile
 
+
+class ProvisioningError(RuntimeError):
+    """An *expected* provisioning failure that should skip the harness quietly.
+
+    Raised by a driver's ``__aenter__`` when the environment cannot bring a
+    harness up through no fault of the bench — e.g. an own-auth native whose
+    vendor CLI is installed but not logged in, so its forwarder never wires up.
+    The orchestrator turns this into a capability-neutral skip and logs only the
+    reason (no traceback), reserving the full stack for *unexpected* exceptions
+    that signal a genuine driver bug.
+    """
+
+
 # Proto-style policy verdict strings the wrap's policy_verdict event accepts.
 POLICY_ALLOW = "POLICY_ACTION_ALLOW"
 POLICY_DENY = "POLICY_ACTION_DENY"
@@ -91,6 +104,15 @@ _INFRA_ERROR_MARKERS: tuple[str, ...] = (
     # Sequencing, not capability: a prior turn on the shared session had not
     # fully settled. Reported SKIPPED so it never reads as a capability gap.
     "already processing",
+    # Token provisioning failed before the harness could reach the model — an
+    # environment/auth gap (a missing/empty gateway token, a provider auth
+    # command that produced nothing), not a capability the harness lacks.
+    # Seen on full-server for codex ("provider auth command ... empty token")
+    # and pi ("could not fetch a gateway token").
+    "could not fetch a gateway token",
+    "provider auth command",
+    "empty token",
+    "Failed to resolve external API key auth",
 )
 
 
@@ -125,6 +147,19 @@ def infra_failure_reason(result: TurnResult) -> str | None:
             )
     if "already processing" in text:
         return "session busy from a prior turn (sequencing, not a capability gap)"
+    if any(
+        marker in text
+        for marker in (
+            "could not fetch a gateway token",
+            "provider auth command",
+            "empty token",
+            "Failed to resolve external API key auth",
+        )
+    ):
+        return (
+            "gateway/provider token could not be provisioned for this transport "
+            "(environment/auth gap, not a capability the harness lacks)"
+        )
     if "unexpected status" in text:
         return "gateway returned an unexpected status (environment/auth issue)"
     return "environment/connectivity error reaching the gateway"
