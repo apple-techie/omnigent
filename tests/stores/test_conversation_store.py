@@ -1791,6 +1791,34 @@ def test_list_conversations_filtered_by_parent_returns_children_only(
     assert titles == ["coder:auth", "coder:payments"]
 
 
+def test_list_conversations_filtered_by_title(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """``title`` filter returns only children with an exact title match."""
+    parent = conversation_store.create_conversation()
+    conversation_store.create_conversation(
+        kind="sub_agent", title="coder:auth", parent_conversation_id=parent.id
+    )
+    conversation_store.create_conversation(
+        kind="sub_agent", title="coder:payments", parent_conversation_id=parent.id
+    )
+
+    page = conversation_store.list_conversations(
+        kind="sub_agent",
+        parent_conversation_id=parent.id,
+        title="coder:auth",
+    )
+    assert len(page.data) == 1
+    assert page.data[0].title == "coder:auth"
+
+    empty = conversation_store.list_conversations(
+        kind="sub_agent",
+        parent_conversation_id=parent.id,
+        title="coder:nonexistent",
+    )
+    assert len(empty.data) == 0
+
+
 def test_list_child_conversation_ids_by_parent_groups_direct_subagents(
     conversation_store: SqlAlchemyConversationStore,
 ) -> None:
@@ -3306,8 +3334,8 @@ def test_fork_clone_agent_is_session_scoped(
 ) -> None:
     """A fork that clones an agent creates a session-scoped row, not a built-in.
 
-    The clone must be born with ``session_id`` set so it never appears in
-    the built-in agent list (``session_id IS NULL``) that backs the fork
+    The clone must be born with ``kind='session'`` so it never appears in
+    the built-in agent list (``kind='template'``) that backs the fork
     picker — the regression that surfaced as duplicate "Claude Code" /
     "Codex" entries in the fork dialog.
     """
@@ -4122,7 +4150,7 @@ def _stored_next_position(
     from omnigent.db.db_models import SqlConversation
 
     with conversation_store._session() as session:
-        row = session.get(SqlConversation, conversation_id)
+        row = session.get(SqlConversation, (0, conversation_id))
         assert row is not None
         return row.next_position
 
@@ -4192,7 +4220,7 @@ def test_append_reads_counter_not_max_scan(
     conversation_store.append(conv.id, [_user_message("a"), _user_message("b")])
     # Real max position is 1; jump the counter ahead to 100.
     with conversation_store._session() as session:
-        session.get(SqlConversation, conv.id).next_position = 100
+        session.get(SqlConversation, (0, conv.id)).next_position = 100
 
     conversation_store.append(conv.id, [_user_message("c")])
 
@@ -4218,7 +4246,7 @@ def test_append_falls_back_to_scan_when_counter_null(
         conversation_store.append(conv.id, [_user_message(f"pre{i}") for i in range(preexisting)])
     # Simulate a pre-counter row: clear the maintained counter.
     with conversation_store._session() as session:
-        session.get(SqlConversation, conv.id).next_position = None
+        session.get(SqlConversation, (0, conv.id)).next_position = None
     assert _stored_next_position(conversation_store, conv.id) is None
 
     conversation_store.append(conv.id, [_user_message("new")])

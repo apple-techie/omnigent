@@ -694,7 +694,13 @@ describe("toWorkspaceRelativePath", () => {
     ["/home/u/ws/foo.md?x=1", ROOT, HOME, null, "absolute with ?query → unresolvable"],
     ["https://example.com/x", ROOT, HOME, null, "URL → unresolvable"],
     ["mac-studio:~/ws/foo.md", ROOT, HOME, null, "host-qualified tilde path → unresolvable"],
-    ["ubuntu-root:/home/u/ws/foo.md", ROOT, HOME, null, "host-qualified absolute path → unresolvable"],
+    [
+      "ubuntu-root:/home/u/ws/foo.md",
+      ROOT,
+      HOME,
+      null,
+      "host-qualified absolute path → unresolvable",
+    ],
   ])("%o (root=%o, home=%o) → %o (%s)", (text, root, home, expected, _why) => {
     expect(
       toWorkspaceRelativePath(text as string, root as string | null, home as string | null),

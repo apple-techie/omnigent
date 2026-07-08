@@ -38,7 +38,7 @@ def _now() -> int:
 def _make_agent(
     id: str = "ag_test1",
     name: str = "test-agent",
-    session_id: str | None = None,
+    kind: str = "template",
 ) -> SqlAgent:
     return SqlAgent(
         id=id,
@@ -46,7 +46,7 @@ def _make_agent(
         name=name,
         bundle_location="ag_test1/abc123",
         version=1,
-        session_id=session_id,
+        kind=kind,
     )
 
 
@@ -101,13 +101,13 @@ class TestSqlAgent:
             session.add(agent)
 
         with managed() as session:
-            loaded = session.get(SqlAgent, "ag_test1")
+            loaded = session.get(SqlAgent, (0, "ag_test1"))
             assert loaded is not None
             assert loaded.name == "test-agent"
             assert loaded.version == 1
             assert loaded.description is None
             assert loaded.updated_at is None
-            assert loaded.session_id is None
+            assert loaded.kind == "template"
 
     def test_nullable_columns(self, db_uri: str) -> None:
         engine = get_or_create_engine(db_uri)
@@ -120,43 +120,36 @@ class TestSqlAgent:
             session.add(agent)
 
         with managed() as session:
-            loaded = session.get(SqlAgent, "ag_test1")
+            loaded = session.get(SqlAgent, (0, "ag_test1"))
             assert loaded is not None
             assert loaded.description == "A test agent"
             assert loaded.updated_at is not None
 
-    def test_session_scoped_agent_fk(self, db_uri: str) -> None:
-        """session_id FK to conversations must be valid."""
+    def test_session_scoped_agent_kind(self, db_uri: str) -> None:
+        """A session-scoped agent is stored with kind='session'."""
         engine = get_or_create_engine(db_uri)
         managed = make_managed_session_maker(engine)
 
-        conv = _make_conversation()
-        with managed() as session:
-            session.add(conv)
-
-        agent = _make_agent(session_id="conv_test1")
+        agent = _make_agent(kind="session")
         with managed() as session:
             session.add(agent)
 
         with managed() as session:
-            loaded = session.get(SqlAgent, "ag_test1")
+            loaded = session.get(SqlAgent, (0, "ag_test1"))
             assert loaded is not None
-            assert loaded.session_id == "conv_test1"
+            assert loaded.kind == "session"
 
-    def test_unique_session_id_index(self, db_uri: str) -> None:
-        """ix_agents_session_id is unique -- two agents cannot share the same session_id."""
+    def test_multiple_session_agents_allowed(self, db_uri: str) -> None:
+        """Multiple session-scoped agents are permitted (no unique constraint on kind)."""
         engine = get_or_create_engine(db_uri)
         managed = make_managed_session_maker(engine)
 
-        conv = _make_conversation()
-        a1 = _make_agent(id="ag_1", name="agent-1", session_id="conv_test1")
-        a2 = _make_agent(id="ag_2", name="agent-2", session_id="conv_test1")
+        a1 = _make_agent(id="ag_1", name="agent-1", kind="session")
+        a2 = _make_agent(id="ag_2", name="agent-2", kind="session")
 
-        with pytest.raises(IntegrityError):
-            with managed() as session:
-                session.add(conv)
-                session.add(a1)
-                session.add(a2)
+        with managed() as session:
+            session.add(a1)
+            session.add(a2)
 
 
 # ── SqlFile ───────────────────────────────────────────
@@ -178,7 +171,7 @@ class TestSqlFile:
             session.add(f)
 
         with managed() as session:
-            loaded = session.get(SqlFile, "file_test1")
+            loaded = session.get(SqlFile, (0, "file_test1"))
             assert loaded is not None
             assert loaded.filename == "report.pdf"
             assert loaded.bytes == 12345
@@ -198,7 +191,7 @@ class TestSqlFile:
             session.add(f)
 
         with managed() as session:
-            loaded = session.get(SqlFile, "file_test2")
+            loaded = session.get(SqlFile, (0, "file_test2"))
             assert loaded is not None
             assert loaded.content_type is None
 
@@ -216,7 +209,7 @@ class TestSqlUser:
             session.add(user)
 
         with managed() as session:
-            loaded = session.get(SqlUser, "alice@example.com")
+            loaded = session.get(SqlUser, (0, "alice@example.com"))
             assert loaded is not None
             assert loaded.is_admin is False
             assert loaded.password_hash is None
@@ -236,7 +229,7 @@ class TestSqlUser:
             session.add(user)
 
         with managed() as session:
-            loaded = session.get(SqlUser, "admin@example.com")
+            loaded = session.get(SqlUser, (0, "admin@example.com"))
             assert loaded is not None
             assert loaded.is_admin is True
             assert loaded.password_hash == "$argon2id$hash"
@@ -274,7 +267,7 @@ class TestSqlAccountToken:
             session.add(token)
 
         with managed() as session:
-            loaded = session.get(SqlAccountToken, "tok_invite_abc")
+            loaded = session.get(SqlAccountToken, (0, "tok_invite_abc"))
             assert loaded is not None
             assert loaded.kind == "invite"
             assert loaded.user_id is None
@@ -297,7 +290,7 @@ class TestSqlAccountToken:
             session.add(token)
 
         with managed() as session:
-            loaded = session.get(SqlAccountToken, "tok_magic_xyz")
+            loaded = session.get(SqlAccountToken, (0, "tok_magic_xyz"))
             assert loaded is not None
             assert loaded.kind == "magic"
             assert loaded.user_id == "alice@example.com"
@@ -331,7 +324,7 @@ class TestSqlConversation:
             session.add(conv)
 
         with managed() as session:
-            loaded = session.get(SqlConversation, "conv_test1")
+            loaded = session.get(SqlConversation, (0, "conv_test1"))
             assert loaded is not None
             assert loaded.title == "Hello World"
             assert loaded.kind == "default"
@@ -346,7 +339,7 @@ class TestSqlConversation:
             session.add(conv)
 
         with managed() as session:
-            loaded = session.get(SqlConversation, "conv_test1")
+            loaded = session.get(SqlConversation, (0, "conv_test1"))
             assert loaded is not None
             assert loaded.runner_id is None
             assert loaded.host_id is None
@@ -385,14 +378,18 @@ class TestSqlConversation:
             session.add(child)
 
         with managed() as session:
-            loaded = session.get(SqlConversation, "conv_child")
+            loaded = session.get(SqlConversation, (0, "conv_child"))
             assert loaded is not None
             assert loaded.kind == "sub_agent"
             assert loaded.parent_conversation_id == "conv_parent"
             assert loaded.root_conversation_id == "conv_parent"
 
-    def test_cascade_delete_removes_children(self, db_uri: str) -> None:
-        """Deleting a parent conversation cascades to child conversations."""
+    def test_delete_parent_leaves_children_without_fk(self, db_uri: str) -> None:
+        """Without DB-level FK cascade, deleting a parent leaves child rows intact.
+
+        The application (delete_conversation) is responsible for cleaning
+        up the subtree explicitly.
+        """
         engine = get_or_create_engine(db_uri)
         managed = make_managed_session_maker(engine)
 
@@ -409,12 +406,13 @@ class TestSqlConversation:
             session.add(child)
 
         with managed() as session:
-            p = session.get(SqlConversation, "conv_parent2")
+            p = session.get(SqlConversation, (0, "conv_parent2"))
             assert p is not None
             session.delete(p)
 
+        # Without FK cascade the child is NOT automatically deleted.
         with managed() as session:
-            assert session.get(SqlConversation, "conv_child2") is None
+            assert session.get(SqlConversation, (0, "conv_child2")) is not None
 
 
 # ── SqlConversationItem ───────────────────────────────
@@ -432,7 +430,7 @@ class TestSqlConversationItem:
             session.add(item)
 
         with managed() as session:
-            loaded = session.get(SqlConversationItem, "msg_test1")
+            loaded = session.get(SqlConversationItem, (0, "msg_test1"))
             assert loaded is not None
             assert loaded.conversation_id == "conv_test1"
             assert loaded.type == "message"
@@ -455,8 +453,12 @@ class TestSqlConversationItem:
                 session.add(item1)
                 session.add(item2)
 
-    def test_cascade_delete_with_conversation(self, db_uri: str) -> None:
-        """Deleting a conversation cascades to its items."""
+    def test_delete_conversation_via_orm_leaves_items_without_fk(self, db_uri: str) -> None:
+        """Without DB-level FK cascade, deleting a conversation leaves its items intact.
+
+        The application (delete_conversation) is responsible for deleting
+        items explicitly before or after deleting the conversation row.
+        """
         engine = get_or_create_engine(db_uri)
         managed = make_managed_session_maker(engine)
 
@@ -467,12 +469,13 @@ class TestSqlConversationItem:
             session.add(item)
 
         with managed() as session:
-            c = session.get(SqlConversation, "conv_del")
+            c = session.get(SqlConversation, (0, "conv_del"))
             assert c is not None
             session.delete(c)
 
+        # Without FK cascade the item is NOT automatically deleted.
         with managed() as session:
-            assert session.get(SqlConversationItem, "msg_del") is None
+            assert session.get(SqlConversationItem, (0, "msg_del")) is not None
 
     def test_multiple_items_ordered_by_position(self, db_uri: str) -> None:
         engine = get_or_create_engine(db_uri)
@@ -568,7 +571,7 @@ class TestSqlSessionPermission:
             session.add(perm)
 
         with managed() as session:
-            loaded = session.get(SqlSessionPermission, ("alice@example.com", "conv_test1"))
+            loaded = session.get(SqlSessionPermission, (0, "alice@example.com", "conv_test1"))
             assert loaded is not None
             assert loaded.level == 2
 
@@ -618,7 +621,7 @@ class TestSqlComment:
             session.add(comment)
 
         with managed() as session:
-            loaded = session.get(SqlComment, "cmt_test1")
+            loaded = session.get(SqlComment, (0, "cmt_test1"))
             assert loaded is not None
             assert loaded.path == "src/App.tsx"
             assert loaded.body == "Looks good!"
@@ -648,7 +651,7 @@ class TestSqlComment:
             session.add(comment)
 
         with managed() as session:
-            loaded = session.get(SqlComment, "cmt_test2")
+            loaded = session.get(SqlComment, (0, "cmt_test2"))
             assert loaded is not None
             assert loaded.anchor_content is None
             assert loaded.created_by is None
@@ -665,6 +668,7 @@ class TestSqlPolicy:
         policy = SqlPolicy(
             id="pol_test1",
             name="cost-guard",
+            scope="default",
             created_at=_now(),
             type="python",
             handler="omnigent.policies.cost_guard:handler",
@@ -674,7 +678,7 @@ class TestSqlPolicy:
             session.add(policy)
 
         with managed() as session:
-            loaded = session.get(SqlPolicy, "pol_test1")
+            loaded = session.get(SqlPolicy, (0, "pol_test1"))
             assert loaded is not None
             assert loaded.name == "cost-guard"
             assert loaded.type == "python"
@@ -691,6 +695,7 @@ class TestSqlPolicy:
             id="pol_1",
             name="guard",
             session_id="conv_test1",
+            scope="session",
             created_at=_now(),
             type="python",
             handler="mod:fn",
@@ -699,6 +704,7 @@ class TestSqlPolicy:
             id="pol_2",
             name="guard",
             session_id="conv_test1",
+            scope="session",
             created_at=_now(),
             type="python",
             handler="mod:fn2",
@@ -731,7 +737,7 @@ class TestSqlHost:
             session.add(host)
 
         with managed() as session:
-            loaded = session.get(SqlHost, ("corey@example.com", "corey-laptop"))
+            loaded = session.get(SqlHost, (0, "corey@example.com", "corey-laptop"))
             assert loaded is not None
             assert loaded.host_id == "host_abc123"
             assert loaded.status == "online"
@@ -801,7 +807,7 @@ class TestSqlUserDailyCost:
             session.add(row)
 
         with managed() as session:
-            loaded = session.get(SqlUserDailyCost, ("alice@example.com", "2026-06-16"))
+            loaded = session.get(SqlUserDailyCost, (0, "alice@example.com", "2026-06-16"))
             assert loaded is not None
             assert loaded.cost_usd == pytest.approx(1.23)
             assert loaded.ask_approved_usd == pytest.approx(0.0)

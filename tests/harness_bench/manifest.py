@@ -63,6 +63,15 @@ _AUTH_PROSE: dict[AuthModel, str] = {
 # These stay explicitly SUPPORTED for the official (P0) harnesses: every one
 # completes a turn, calls tools, and enforces a policy DENY. They are NOT
 # derived from any capability axis (see the module docstring / seam brief).
+#
+# tool_calling is now live-probed on BOTH transports: SDK harnesses via
+# full-server (server-dispatched builtin) and native harnesses via native-tui
+# (observing the vendor's own function_call item). policy_deny is live on
+# full-server (spec-baked deny) and wired on native-tui (a session-attached CEL
+# deny + the response.policy_denied stream signal), though native enforcement is
+# a follow-up. An environment gap (fail-open policy, no tool-provocation mapping,
+# CEL unavailable) reports SKIPPED, so SUPPORTED here only ever drifts on a
+# genuine capability gap.
 _PROBE_ONLY_DECLARED: dict[str, Verdict] = {
     "basic_turn": Verdict.SUPPORTED,
     "tool_calling": Verdict.SUPPORTED,
@@ -100,8 +109,11 @@ def _declared_from_capabilities(harness: str) -> dict[str, Verdict]:
 
     caps = harness_capabilities().get(harness)
     if caps is not None:
-        # streaming: True → deltas (SUPPORTED); False → complete-only (PARTIAL).
-        declared["streaming"] = Verdict.SUPPORTED if caps.streaming else Verdict.PARTIAL
+        # streaming is binary: True → SUPPORTED, False → UNSUPPORTED. PARTIAL is
+        # a probe observation (coalesced single delta), never a declared value —
+        # declaring False as PARTIAL would drift against a harness the probe
+        # reports UNSUPPORTED (0 deltas).
+        declared["streaming"] = Verdict.SUPPORTED if caps.streaming else Verdict.UNSUPPORTED
         # interrupt: True → SUPPORTED; False → UNSUPPORTED.
         declared["interrupt"] = Verdict.SUPPORTED if caps.interrupt else Verdict.UNSUPPORTED
 
@@ -152,32 +164,50 @@ OFFICIAL_PROFILES: dict[str, BenchProfile] = {
 # ── native-tui harnesses ─────────────────────────────────────────
 #
 # Native harnesses are not in HARNESS_PROBES (that matrix is the SDK-wrap
-# e2e set), so their profiles are built directly here. Both shipped natives
-# are OMNIGENT_CREDENTIAL vendors the native-tui driver can run and observe
-# (see native_tui_driver for the per-vendor provisioning). OWN_AUTH natives
-# (cursor-native, kiro-native, ...) need a vendor login the bench cannot
-# provision, so they are left to a --harness <ref> opt-in.
+# e2e set), so their profiles are derived here directly from the capability
+# model: every harness with integration_mode == NATIVE_TUI is registered, so
+# the shipped natives and any community-plugin native (harness_capabilities()
+# discovers plugins via entry points) are probeable by name with no bench edit.
 #
-# model: native harnesses take the model as a launch --model, not a
-# HARNESS_<H>_MODEL env var, so they are absent from model_env_keys() and
-# their model_override declares UNKNOWN (honest — the probe confirms it live
-# once native model-override observation is wired).
-_NATIVE_PROFILES: dict[str, tuple[str, str]] = {
-    # harness: (model, marker)
-    "claude-native": ("databricks-claude-sonnet-4-6", "CLAUDE_NATIVE_OK"),
-    "codex-native": ("databricks-gpt-5-4-mini", "CODEX_NATIVE_OK"),
+# What the bench can actually *run* is a separate axis from what it registers.
+# OMNIGENT_CREDENTIAL natives (claude, codex) route through the run's Databricks
+# profile, so the bench runs them unattended. OWN_AUTH / session-scoped natives
+# need a vendor login the bench cannot provision; they are still registered
+# (visible, resolvable, honest declared matrix) but skip-gate at the driver's
+# unavailable() on a host without that login.
+#
+# model: an OMNIGENT_CREDENTIAL native routes its launch --model through the
+# gateway, so it takes a databricks-* model; an own-auth native's model lives
+# in the vendor's namespace the bench does not control, and is unused in
+# practice (the harness skip-gates before a turn). model_override still
+# declares UNKNOWN for all natives (absent from model_env_keys()), confirmed
+# live by the probe.
+_NATIVE_CREDENTIAL_MODELS: dict[str, str] = {
+    "claude-native": "databricks-claude-sonnet-4-6",
+    "codex-native": "databricks-gpt-5-4-mini",
+}
+_NATIVE_DEFAULT_MODEL = "databricks-claude-sonnet-4-6"
+
+# The vendor CLI the driver skip-gates on. Usually the harness id minus
+# "-native" (claude-native -> "claude"), but several vendors ship a
+# differently-named binary (the _DEFAULT_*_COMMAND in each omnigent/*_native.py),
+# so those are listed explicitly. A missing/unlisted native falls back to the
+# suffix convention.
+_NATIVE_CLI_BINARY: dict[str, str] = {
+    "cursor-native": "cursor-agent",
+    "kiro-native": "kiro-cli",
 }
 
 
-def _native_profile(harness: str, model: str, marker: str) -> BenchProfile:
-    """Build a native-tui :class:`BenchProfile`, columns/verdicts from capabilities."""
+def _native_profile(harness: str) -> BenchProfile:
+    """Build a native-tui :class:`BenchProfile`; all fields from convention/capabilities."""
     caps = harness_capabilities().get(harness)
-    # The vendor CLI the driver skip-gates on (claude-native -> "claude").
-    cli_binary = harness.removesuffix("-native")
+    cli_binary = _NATIVE_CLI_BINARY.get(harness, harness.removesuffix("-native"))
     env_prefix = "HARNESS_" + harness.upper().replace("-", "_") + "_"
+    marker = harness.upper().replace("-", "_") + "_OK"
     return BenchProfile(
         harness=harness,
-        model=model,
+        model=_NATIVE_CREDENTIAL_MODELS.get(harness, _NATIVE_DEFAULT_MODEL),
         env_prefix=env_prefix,
         marker=marker,
         cli_binary=cli_binary,
@@ -189,8 +219,17 @@ def _native_profile(harness: str, model: str, marker: str) -> BenchProfile:
     )
 
 
-for _h, (_model, _marker) in _NATIVE_PROFILES.items():
-    OFFICIAL_PROFILES[_h] = _native_profile(_h, _model, _marker)
+def _native_tui_harnesses() -> list[str]:
+    """Every harness the capability model marks as native-tui (plugins included)."""
+    return [
+        harness
+        for harness, caps in harness_capabilities().items()
+        if caps.integration_mode is IntegrationMode.NATIVE_TUI
+    ]
+
+
+for _h in _native_tui_harnesses():
+    OFFICIAL_PROFILES[_h] = _native_profile(_h)
 
 
 __all__ = ["OFFICIAL_PROFILES"]

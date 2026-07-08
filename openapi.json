@@ -980,6 +980,33 @@
         "title": "ConversationRef",
         "type": "object"
       },
+      "CopyFilesRequest": {
+        "description": "Request to copy files from a lineage ancestor into a session.\n\nThe destination session is the path parameter; `source_session_id`\nmust be a STRICT ancestor of the destination up its\n`parent_conversation_id` chain (spawn lineage) \u2014 the destination may\nnot name itself as the source. The copy creates new child-scoped rows \u2014\nit does not grant cross-session read access.",
+        "properties": {
+          "file_ids": {
+            "description": "Non-empty, unique ids of the source-owned files to copy, e.g. `[\"file_abc123\"]`.",
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "File Ids",
+            "type": "array",
+            "uniqueItems": true
+          },
+          "source_session_id": {
+            "description": "Session that owns the source files, e.g. `\"conv_parent\"`. Must be a strict ancestor of the destination.",
+            "title": "Source Session Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_session_id",
+          "file_ids"
+        ],
+        "title": "CopyFilesRequest",
+        "type": "object"
+      },
       "CreateDefaultPolicyRequest": {
         "description": "Request body for `POST /v1/policies`.",
         "properties": {
@@ -2148,6 +2175,52 @@
         "title": "PermissionObject",
         "type": "object"
       },
+      "PolicyDeniedEvent": {
+        "description": "Signal that a policy DENY was enforced on a native harness turn.\n\nA native harness (Claude Code, Codex, ...) routes each tool call and\nprompt through Omnigent's policy engine via the vendor command-hook\n(`POST /v1/sessions/{id}/policies/evaluate`). The DENY verdict is\nreturned synchronously to that hook, so unlike the SDK/wrap path there is\nno stream-visible signal that a native action was blocked \u2014 only the\n*effect* (the blocked tool never runs). This event surfaces the decision\nitself on the session stream so observers (the web UI, the capability\nbench) can see a native DENY as a positive signal rather than infer it\nfrom an absence.\n\nFire-and-forget and observational: it does not gate the turn (the hook\nresponse already did that) and carries no correlation id.",
+        "properties": {
+          "conversation_id": {
+            "description": "Session/conversation id the DENY applies to, e.g. `\"conv_abc123\"`.",
+            "title": "Conversation Id",
+            "type": "string"
+          },
+          "phase": {
+            "default": "",
+            "description": "The policy phase the DENY landed on, e.g. `\"tool_call\"`.",
+            "title": "Phase",
+            "type": "string"
+          },
+          "reason": {
+            "default": "",
+            "description": "Human-readable deny reason from the deciding policy, e.g. `\"Blocked by policy.\"`.",
+            "title": "Reason",
+            "type": "string"
+          },
+          "sequence_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sequence Number"
+          },
+          "type": {
+            "const": "response.policy_denied",
+            "description": "Always `\"response.policy_denied\"`.",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "conversation_id"
+        ],
+        "title": "PolicyDeniedEvent",
+        "type": "object"
+      },
       "PolicySummary": {
         "description": "Safe subset of a policy's spec for API exposure.\n\nExposes the policy name, type, and phases so the UI can\ndisplay which guardrails are active on an agent. The full\npolicy body (prompt text, callable path, label conditions)\nis intentionally excluded \u2014 this is a summary for display,\nnot a full spec.",
         "properties": {
@@ -2859,6 +2932,7 @@
             "response.output_file.done": "#/components/schemas/OutputFileDoneEvent",
             "response.output_item.done": "#/components/schemas/OutputItemDoneEvent",
             "response.output_text.delta": "#/components/schemas/OutputTextDeltaEvent",
+            "response.policy_denied": "#/components/schemas/PolicyDeniedEvent",
             "response.queued": "#/components/schemas/QueuedEvent",
             "response.reasoning.started": "#/components/schemas/ReasoningStartedEvent",
             "response.reasoning_summary_text.delta": "#/components/schemas/ReasoningSummaryTextDeltaEvent",
@@ -2986,6 +3060,9 @@
           },
           {
             "$ref": "#/components/schemas/ElicitationResolvedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/PolicyDeniedEvent"
           },
           {
             "$ref": "#/components/schemas/CreatedEvent"
@@ -6544,6 +6621,62 @@
         ]
       }
     },
+    "/v1/hosts/{host_id}/worktrees": {
+      "get": {
+        "description": "List the git worktrees of a repository on a host.\n\nUsed by the Web UI's new-session worktree picker to show the\nworktrees a session can start in directly. Owner-scoped exactly\nlike the filesystem browse endpoints; NOT scoped to a session.\nA path that is not a git repository is reported as 400 so the\npicker can quietly fall back to \"no worktrees\".\n\n**Returns:** `{\"object\": \"list\", \"data\": [{path, branch, is_main, detached}, ...]}` (main first).\n\n**Raises**\n\n- `HTTPException` \u2014 404 if host not found, 403 if not owned by caller, 409 if host is offline/unresponsive, 400 on path validation or a non-git path.",
+        "operationId": "list_host_worktrees_v1_hosts__host_id__worktrees_get",
+        "parameters": [
+          {
+            "description": "Host identifier, e.g. `\"host_a1b2c3d4...\"`.",
+            "in": "path",
+            "name": "host_id",
+            "required": true,
+            "schema": {
+              "title": "Host Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Absolute path inside the repo on the host to list worktrees for, e.g. `\"/Users/alice/myrepo\"`.",
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "title": "Path",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Host Worktrees V1 Hosts  Host Id  Worktrees Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Host Worktrees",
+        "tags": [
+          "hosts"
+        ]
+      }
+    },
     "/v1/info": {
       "get": {
         "description": "Runtime capabilities probe for the SPA + CLI.\n\nReturned at app boot by the frontend (and by `omnigent login` when it needs to choose between flows). Drives\nconditional route registration and chrome on the SPA side\n\u2014 when `accounts_enabled` is false, the SPA never\nregisters `/login`, `/register`, `/members` and\nnever renders the AccountMenu, so the bundle behaves\nidentically to a pre-PR-2008 build for header / OIDC\ndeploys (in particular, the internal hosted product that\nsyncs from this repo).\n\nAuthentication: this endpoint is intentionally UNAUTHED\nso the SPA can probe it before holding a session cookie.\nIt exposes no sensitive state \u2014 only the active auth\nsource, the login URL, whether first-run admin setup is\nstill pending (`needs_setup`), coarse capability\nbooleans (`databricks_features`,\n`managed_sandboxes_enabled`), the short sandbox\nprovider name (`sandbox_provider`) the web UI labels the\nnew-session sandbox option with, and the installed\n`server_version` (already public via `/api/version`).",
@@ -7801,6 +7934,40 @@
               "pattern": "^(asc|desc)$",
               "title": "Order",
               "type": "string"
+            }
+          },
+          {
+            "description": "When set, only return children whose title starts with this agent type (the segment before the `\":\"`). Combined with `session_name` to form the exact title `\"{tool}:{session_name}\"` for server-side filtering.",
+            "in": "query",
+            "name": "tool",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tool"
+            }
+          },
+          {
+            "description": "When set alongside `tool`, only return children whose title matches `\"{tool}:{session_name}\"` exactly.",
+            "in": "query",
+            "name": "session_name",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Session Name"
             }
           }
         ],
@@ -9309,6 +9476,17 @@
               "title": "Order",
               "type": "string"
             }
+          },
+          {
+            "description": "When true, return an empty list for absent paths.",
+            "in": "query",
+            "name": "missing_ok",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Missing Ok",
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
@@ -9489,6 +9667,17 @@
               "pattern": "^(asc|desc)$",
               "title": "Order",
               "type": "string"
+            }
+          },
+          {
+            "description": "When true, return an empty list for absent paths.",
+            "in": "query",
+            "name": "missing_ok",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Missing Ok",
+              "type": "boolean"
             }
           }
         ],
@@ -10106,6 +10295,58 @@
         ]
       }
     },
+    "/v1/sessions/{session_id}/resources/files:copy": {
+      "post": {
+        "description": "Copy lineage-owned files into this (destination) session.\n\nAuthorizes by spawn lineage: `body.source_session_id` must be a\nSTRICT ancestor of this session up the `parent_conversation_id`\nchain \u2014 the session may not name itself as the source. Each source\nfile is read and re-stored as a new child-scoped row owned by\n`session_id` \u2014 this preserves the session-scoping invariant (the\nchild reads its OWN copy; no cross-session read grant is created).\nValidation is all-or-nothing: an unauthorized source, a missing\nfile, or a request past the copy limits copies nothing.\n\nThe request is bounded before any blob is read: the file count and\nthe summed `StoredFile.bytes` are checked against the copy limits\nduring metadata validation, so an over-limit request is rejected\nwithout buffering a single blob. Within the limits, files are copied\none at a time (read \u2192 create \u2192 put) so peak memory is a single blob,\nnot the whole batch.\n\n**Parameters**\n\n- `body` \u2014 Source session id plus the file ids to copy.\n\n**Returns:** A `session.files.copied` object carrying the `{source_file_id: new_file_id}` mapping.",
+        "operationId": "copy_session_files_v1_sessions__session_id__resources_files_copy_post",
+        "parameters": [
+          {
+            "description": "Destination (child) session/conversation id.",
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CopyFilesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Copy Session Files",
+        "tags": [
+          "session_resources"
+        ]
+      }
+    },
     "/v1/sessions/{session_id}/resources/terminals": {
       "get": {
         "description": "Return only terminal resources for a session.\n\nThe runner endpoint's pagination params (`limit` / `after` /\n`before` / `order`) are forwarded from the incoming query\nstring \u2014 without this, a client-requested `order=asc` (the web\nterminal tabs rely on creation order to keep the session's own\nterminal first) would be silently dropped and the runner's\n`desc` default would apply.\n\n**Returns:** `PaginatedList` of terminal resources.",
@@ -10402,7 +10643,7 @@
     },
     "/v1/sessions/{session_id}/switch-agent": {
       "post": {
-        "description": "Switch an existing session in place to a different agent/harness.\n\nUnlike fork, this keeps the SAME session \u2014 transcript, comments,\nfiles, host, and workspace are untouched; only the agent/harness\nchanges. The current session-scoped agent is replaced by a clone\nof the target built-in, model settings carry over only within the\nsame provider family (a model id is provider-bound), the native\nruntime session id is cleared, and the harness-presentation labels\nare recomputed for the target. The next turn cold-starts the new\nharness (rebuilding the native transcript from this session's own\nitems for a same-family native target). Only built-in agents are\nbindable, and only while the session is idle.\n\n**Parameters**\n\n- `body` \u2014 The validated `SessionSwitchAgentRequest`.\n\n**Returns:** A `SessionResponse` describing the session after the switch (status `\"idle\"`).\n\n**Raises**\n\n- `OmnigentError` \u2014 404 if the session or target agent does not exist or the target is not a bindable built-in; 403 if the caller lacks edit access; 400 if the session is a sub-agent, has no agent binding, or the target bundle can't be loaded; 409 if a turn is currently running.",
+        "description": "Switch an existing session in place to a different agent/harness.\n\nUnlike fork, this keeps the SAME session \u2014 transcript, comments,\nfiles, host, and workspace are untouched; only the agent/harness\nchanges. The current session-scoped agent is replaced by a clone\nof the target agent's bundle, model settings carry over only\nwithin the same provider family (a model id is provider-bound),\nthe native runtime session id is cleared, and the\nharness-presentation labels are recomputed for the target. The\nnext turn cold-starts the new harness (rebuilding the native\ntranscript from this session's own items for a same-family native\ntarget). Template agents are cloneable; session-scoped targets\nare cloneable only when the caller can read their owning session.\nSwitching is allowed only while the session is idle.\n\n**Parameters**\n\n- `body` \u2014 The validated `SessionSwitchAgentRequest`.\n\n**Returns:** A `SessionResponse` describing the session after the switch (status `\"idle\"`).\n\n**Raises**\n\n- `OmnigentError` \u2014 404 if the session or target agent does not exist or the target is not cloneable; 403 if the caller lacks edit access; 400 if the session is a sub-agent, has no agent binding, or the target bundle can't be loaded; 409 if a turn is currently running.",
         "operationId": "switch_session_agent_v1_sessions__session_id__switch_agent_post",
         "parameters": [
           {
@@ -10456,7 +10697,7 @@
     },
     "/v1/sessions/{source_id}/fork": {
       "post": {
-        "description": "Fork an existing session into a new session.\n\nDeep-copies the source session's conversation items and\nclones the agent into a new session. When `body.agent_id`\nis set, the fork binds that built-in agent instead of the\nsource's \u2014 switching harness (e.g. Claude-SDK \u2192 Claude Code,\nor Claude \u2192 Codex). The source's model settings carry over\nonly within the same provider family; a same-family native\ntarget also carries conversation history (the runner rebuilds\nits transcript). The REPL/CLI binds the fork to its runner via\n`PATCH /v1/sessions/{id}` after creation.\n\nWhen `body.up_to_response_id` is set, only history up to and\nincluding that response is copied into the fork (a \"fork from\nthis response\"); a native target then rebuilds its transcript\nfrom the truncated items instead of resuming the source's full\nnative transcript.\n\n**Parameters**\n\n- `body` \u2014 The validated `SessionForkRequest`.\n\n**Returns:** A `SessionResponse` describing the newly created fork (status `\"idle\"`).\n\n**Raises**\n\n- `OmnigentError` \u2014 404 if *source_id* does not exist or `body.agent_id` is not a bindable built-in agent; 403 if the caller lacks read access; 400 if the source is a sub-agent session, has no agent binding, or `body.up_to_response_id` names no response in the source session.",
+        "description": "Fork an existing session into a new session.\n\nDeep-copies the source session's conversation items and\nclones the agent into a new session. When `body.agent_id`\nis set, the fork clones that target agent's bundle instead of\nthe source's \u2014 switching harness (e.g. Claude-SDK \u2192 Claude\nCode, or Claude \u2192 Codex). Template agents are cloneable; a\nsession-scoped target is cloneable only when the caller can\nread its owning session. The source's model settings carry\nover only within the same provider family; a same-family\nnative target also carries conversation history (the runner\nrebuilds its transcript). The REPL/CLI binds the fork to its\nrunner via `PATCH /v1/sessions/{id}` after creation.\n\nWhen `body.up_to_response_id` is set, only history up to and\nincluding that response is copied into the fork (a \"fork from\nthis response\"); a native target then rebuilds its transcript\nfrom the truncated items instead of resuming the source's full\nnative transcript.\n\n**Parameters**\n\n- `body` \u2014 The validated `SessionForkRequest`.\n\n**Returns:** A `SessionResponse` describing the newly created fork (status `\"idle\"`).\n\n**Raises**\n\n- `OmnigentError` \u2014 404 if *source_id* does not exist or `body.agent_id` is not a cloneable target; 403 if the caller lacks read access; 400 if the source is a sub-agent session, has no agent binding, or `body.up_to_response_id` names no response in the source session.",
         "operationId": "fork_session_v1_sessions__source_id__fork_post",
         "parameters": [
           {

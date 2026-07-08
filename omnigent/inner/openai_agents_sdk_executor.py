@@ -38,6 +38,7 @@ from .executor import (
     ExecutorEvent,
     Message,
     ProgressEvent,
+    ReasoningChunk,
     TextChunk,
     ToolCallComplete,
     ToolCallRequest,
@@ -1654,7 +1655,16 @@ class OpenAIAgentsSDKExecutor(Executor):
                                     source="openai_agents_sdk",
                                     detail=raw_type,
                                 )
-
+                            if raw_type in (
+                                "response.reasoning_summary_text.delta",
+                                "response.reasoning_text.delta",
+                            ):
+                                reasoning_delta = data.delta
+                                if reasoning_delta:
+                                    yield ReasoningChunk(
+                                        delta=reasoning_delta,
+                                        event_type="reasoning_text",
+                                    )
                     elif event.type == "run_item_stream_event":
                         item_event = cast(_RunItemEvent, event)
                         sdk_item = item_event.item

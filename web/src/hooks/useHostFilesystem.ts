@@ -110,9 +110,7 @@ function normalizeHostFilesystemEntry(value: unknown): HostFilesystemEntry | nul
     raw.type === "directory" || raw.type === "file" || raw.type === "other" ? raw.type : "other";
   const bytes = typeof raw.bytes === "number" && Number.isFinite(raw.bytes) ? raw.bytes : null;
   const modifiedAt =
-    typeof raw.modified_at === "number" && Number.isFinite(raw.modified_at)
-      ? raw.modified_at
-      : 0;
+    typeof raw.modified_at === "number" && Number.isFinite(raw.modified_at) ? raw.modified_at : 0;
 
   return {
     name: typeof raw.name === "string" && raw.name.length > 0 ? raw.name : basename(raw.path),

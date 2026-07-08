@@ -1140,8 +1140,12 @@ def test_repl_label_driven_ask_approves(
         )
         child.send("y" + "\r")
         child.expect("approved", timeout=5)
-        # Turn 2 completes — LLM replies normally.
-        _wait_for_turn_complete(child, timeout=45)
+        # Turn 2 completes only if the approval released the parked request
+        # and the LLM's second response renders. Sync on that deterministic
+        # content instead of the cosmetic ``· ready`` toolbar; under CI load
+        # prompt_toolkit can miss that idle repaint even though the turn has
+        # finished.
+        child.expect("Continuing as requested.", timeout=120)
     finally:
         try:
             child.send("/quit" + "\r")

@@ -20,7 +20,7 @@ from sqlalchemy import Engine, select, update
 from sqlalchemy import delete as sql_delete
 from sqlalchemy.orm import Session
 
-from omnigent.db.db_models import SqlConversation, SqlHost
+from omnigent.db.db_models import SqlConversation, SqlHost, current_workspace_id
 from omnigent.db.utils import get_or_create_engine, make_managed_session_maker, now_epoch
 
 # A host is considered live only if its row was touched (connect or
@@ -234,7 +234,7 @@ class HostStore:
             json.dumps(configured_harnesses) if configured_harnesses is not None else None
         )
         with self._session() as session:
-            row = session.get(SqlHost, (owner, name))
+            row = session.get(SqlHost, (current_workspace_id(), owner, name))
             if row is None and allow_host_id_reown:
                 reowned = self._reown_host_id(
                     session,
@@ -252,11 +252,12 @@ class HostStore:
                     # was regenerated after a fresh install or a wiped
                     # ~/.omnigent. host_id is a UNIQUE column that
                     # conversations.host_id references via
-                    # fk_conversations_host_id_hosts (ON DELETE SET NULL, NO
-                    # ON UPDATE CASCADE). Renaming it in place while child
-                    # conversations still point at the old value raises a
-                    # ForeignKeyViolation on Postgres, which crashes the host
-                    # tunnel handler — the host then reconnect-loops forever
+                    # conversations.host_id references it as a plain column
+                    # (no FK). Renaming it in place while child conversations
+                    # still point at the old value is harmless at the DB level,
+                    # but the application nulls host_id on those sessions first.
+                    # On Postgres with an FK this used to raise ForeignKeyViolation
+                    # which crashed the host tunnel handler — no longer applies.
                     # and never registers (no host shows in the UI). SQLite
                     # dev doesn't enforce FKs by default, so this only bites
                     # on the hosted Postgres/Lakebase deploy.
@@ -308,13 +309,19 @@ class HostStore:
         old_host_id = row.host_id
         bound_ids = list(
             session.execute(
-                select(SqlConversation.id).where(SqlConversation.host_id == old_host_id)
+                select(SqlConversation.id).where(
+                    SqlConversation.workspace_id == current_workspace_id(),
+                    SqlConversation.host_id == old_host_id,
+                )
             ).scalars()
         )
         if bound_ids:
             session.execute(
                 update(SqlConversation)
-                .where(SqlConversation.host_id == old_host_id)
+                .where(
+                    SqlConversation.workspace_id == current_workspace_id(),
+                    SqlConversation.host_id == old_host_id,
+                )
                 .values(host_id=None)
             )
             session.flush()
@@ -323,7 +330,10 @@ class HostStore:
         if bound_ids:
             session.execute(
                 update(SqlConversation)
-                .where(SqlConversation.id.in_(bound_ids))
+                .where(
+                    SqlConversation.workspace_id == current_workspace_id(),
+                    SqlConversation.id.in_(bound_ids),
+                )
                 .values(host_id=new_host_id)
             )
             session.flush()
@@ -363,7 +373,9 @@ class HostStore:
             *host_id* (caller falls through to a normal insert).
         """
         existing = session.execute(
-            select(SqlHost).where(SqlHost.host_id == host_id)
+            select(SqlHost).where(
+                SqlHost.workspace_id == current_workspace_id(), SqlHost.host_id == host_id
+            )
         ).scalar_one_or_none()
         if existing is None:
             return None
@@ -371,7 +383,10 @@ class HostStore:
         now = now_epoch()
         session.execute(
             update(SqlHost)
-            .where(SqlHost.host_id == host_id)
+            .where(
+                SqlHost.workspace_id == current_workspace_id(),
+                SqlHost.host_id == host_id,
+            )
             .values(
                 owner=owner,
                 name=name,
@@ -404,7 +419,9 @@ class HostStore:
         """
         with self._session() as session:
             row = session.execute(
-                select(SqlHost).where(SqlHost.host_id == host_id)
+                select(SqlHost).where(
+                    SqlHost.workspace_id == current_workspace_id(), SqlHost.host_id == host_id
+                )
             ).scalar_one_or_none()
             if row is not None:
                 row.status = "offline"
@@ -430,7 +447,12 @@ class HostStore:
         # pure overhead. A missing host simply matches no rows (a no-op).
         with self._session() as session:
             session.execute(
-                update(SqlHost).where(SqlHost.host_id == host_id).values(updated_at=now_epoch())
+                update(SqlHost)
+                .where(
+                    SqlHost.workspace_id == current_workspace_id(),
+                    SqlHost.host_id == host_id,
+                )
+                .values(updated_at=now_epoch())
             )
 
     def is_online(self, host_id: str) -> bool:
@@ -477,7 +499,8 @@ class HostStore:
         with self._session() as session:
             rows = session.execute(
                 select(SqlHost.host_id, SqlHost.status, SqlHost.updated_at).where(
-                    SqlHost.host_id.in_(unique_ids)
+                    SqlHost.workspace_id == current_workspace_id(),
+                    SqlHost.host_id.in_(unique_ids),
                 )
             ).all()
         return {
@@ -500,7 +523,10 @@ class HostStore:
         with self._session() as session:
             rows = (
                 session.query(SqlHost)
-                .filter(SqlHost.owner == owner)
+                .filter(
+                    SqlHost.workspace_id == current_workspace_id(),
+                    SqlHost.owner == owner,
+                )
                 .order_by(SqlHost.updated_at.desc())
                 .all()
             )
@@ -516,7 +542,9 @@ class HostStore:
         """
         with self._session() as session:
             row = session.execute(
-                select(SqlHost).where(SqlHost.host_id == host_id)
+                select(SqlHost).where(
+                    SqlHost.workspace_id == current_workspace_id(), SqlHost.host_id == host_id
+                )
             ).scalar_one_or_none()
             if row is None:
                 return None
@@ -573,7 +601,9 @@ class HostStore:
         token_hash = hash_host_launch_token(token)
         with self._session() as session:
             existing = session.execute(
-                select(SqlHost).where(SqlHost.host_id == host_id)
+                select(SqlHost).where(
+                    SqlHost.workspace_id == current_workspace_id(), SqlHost.host_id == host_id
+                )
             ).scalar_one_or_none()
             if existing is not None:
                 if existing.owner != owner:
@@ -626,7 +656,10 @@ class HostStore:
         """
         with self._session() as session:
             row = session.execute(
-                select(SqlHost).where(SqlHost.token_hash == hash_host_launch_token(token))
+                select(SqlHost).where(
+                    SqlHost.workspace_id == current_workspace_id(),
+                    SqlHost.token_hash == hash_host_launch_token(token),
+                )
             ).scalar_one_or_none()
             # token_expires_at is written together with token_hash, so a
             # matched row always carries it; the None arm is mypy
@@ -641,16 +674,28 @@ class HostStore:
 
         Managed-host teardown: removes the host from the picker AND
         revokes its launch token in one operation (the row IS the
-        credential). ``conversations.host_id`` references this row with
-        ``ON DELETE SET NULL``, so any remaining session bindings are
-        nulled rather than blocking the delete. No-op when the row does
-        not exist — deletion is invoked from best-effort cleanup paths
-        that may race.
+        credential). Explicitly nulls ``conversations.host_id`` for any
+        sessions still bound to this host — the DB no longer cascades
+        this via FK. No-op when the row does not exist — deletion is
+        invoked from best-effort cleanup paths that may race.
 
         :param host_id: Host identifier, e.g. ``"host_a1b2c3d4..."``.
         """
         with self._session() as session:
-            session.execute(sql_delete(SqlHost).where(SqlHost.host_id == host_id))
+            session.execute(
+                update(SqlConversation)
+                .where(
+                    SqlConversation.workspace_id == current_workspace_id(),
+                    SqlConversation.host_id == host_id,
+                )
+                .values(host_id=None)
+            )
+            session.execute(
+                sql_delete(SqlHost).where(
+                    SqlHost.workspace_id == current_workspace_id(),
+                    SqlHost.host_id == host_id,
+                )
+            )
 
     def revoke_launch_token(self, host_id: str) -> None:
         """
@@ -667,7 +712,9 @@ class HostStore:
         """
         with self._session() as session:
             row = session.execute(
-                select(SqlHost).where(SqlHost.host_id == host_id)
+                select(SqlHost).where(
+                    SqlHost.workspace_id == current_workspace_id(), SqlHost.host_id == host_id
+                )
             ).scalar_one_or_none()
             if row is None:
                 return
