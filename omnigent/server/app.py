@@ -35,6 +35,8 @@ from omnigent.harness_plugins import (
     OPENCODE_NATIVE_CODING_AGENT,
     PI_NATIVE_CODING_AGENT,
     QWEN_NATIVE_CODING_AGENT,
+    plugin_state,
+    valid_harnesses,
 )
 from omnigent.resources import examples as _examples_resources
 from omnigent.runtime import (
@@ -442,6 +444,7 @@ def _ensure_default_agents(
     _ensure_default_kimi_native_agent(agent_store, artifact_store, agent_cache)
     _ensure_default_debby_agent(agent_store, artifact_store, agent_cache)
     _ensure_default_polly_agent(agent_store, artifact_store, agent_cache)
+    _ensure_default_community_cli_harness_agents(agent_store, artifact_store, agent_cache)
     _ensure_extra_builtin_agents(agent_store, artifact_store, agent_cache)
 
 
@@ -453,6 +456,76 @@ def _ensure_default_agents(
 # or an e2e fixture — ship custom always-available agents (e.g. a plain
 # claude-sdk chat agent that a fork can switch into).
 _EXTRA_BUILTIN_AGENTS_ENV = "OMNIGENT_BUILTIN_AGENT_DIRS"
+
+
+def _community_cli_harness_labels() -> dict[str, str]:
+    """Return community CLI-subprocess harnesses that should be startable.
+
+    Community harness plugins register execution support, labels, and
+    capabilities. A labeled ``cli-subprocess`` harness can be exposed as a
+    normal built-in agent because it runs through the standard runner harness
+    process path and does not require terminal-wrapper metadata.
+    """
+    from omnigent.harness_capabilities import IntegrationMode
+
+    accepted = valid_harnesses()
+    labels: dict[str, str] = {}
+    for contribution in plugin_state().contributions[1:]:
+        for harness, label in contribution.harness_labels.items():
+            if harness not in accepted:
+                continue
+            capability = contribution.capabilities.get(harness)
+            if capability is None:
+                continue
+            if capability.integration_mode is not IntegrationMode.CLI_SUBPROCESS:
+                continue
+            labels[harness] = label
+    return dict(sorted(labels.items(), key=lambda item: item[1].lower()))
+
+
+def _build_community_cli_harness_bundle(harness: str, label: str) -> bytes:
+    """Build a default agent bundle for a community CLI harness."""
+    import tempfile
+
+    import yaml
+
+    from omnigent.spec import materialize_bundle
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        yaml_path = root / f"{harness}.yaml"
+        raw: dict[str, Any] = {
+            "name": harness,
+            "description": f"{label} community CLI harness.",
+            "prompt": (
+                f"{label} is running through the {harness!r} community CLI subprocess harness."
+            ),
+            "executor": {"harness": harness},
+            "os_env": {
+                "type": "caller_process",
+                "cwd": ".",
+                "sandbox": {"type": "none"},
+            },
+        }
+        yaml_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+        bundle_dir = materialize_bundle(yaml_path, root / "bundle")
+        return _tar_gz_dir(bundle_dir)
+
+
+def _ensure_default_community_cli_harness_agents(
+    agent_store: AgentStore,
+    artifact_store: ArtifactStore,
+    agent_cache: Any,
+) -> None:
+    """Register default agents for installed community CLI harnesses."""
+    for harness, label in _community_cli_harness_labels().items():
+        _ensure_builtin_agent(
+            agent_store,
+            artifact_store,
+            agent_cache,
+            name=harness,
+            bundle_bytes=_build_community_cli_harness_bundle(harness, label),
+        )
 
 
 def _ensure_extra_builtin_agents(

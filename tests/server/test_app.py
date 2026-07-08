@@ -601,6 +601,82 @@ def test_ensure_extra_builtin_agents_skips_bad_path_and_seeds_good(
     assert seed_stores.agent_store.get_by_name("does-not-exist") is None
 
 
+def test_ensure_default_community_cli_harness_agents_seeds_pickable_agent(
+    seed_stores: _SeedStores,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Installed community CLI harnesses become deterministic built-in agents."""
+    from omnigent.harness_capabilities import (
+        AuthModel,
+        EffortFamily,
+        Elicitation,
+        HarnessCapabilities,
+        IntegrationMode,
+        ModelFamily,
+        Resume,
+    )
+    from omnigent.db.utils import builtin_agent_id
+    from omnigent.harness_plugins import HarnessContribution, HarnessPluginState
+    from omnigent.spec import _omnigent_compat
+
+    cli_capability = HarnessCapabilities(
+        IntegrationMode.CLI_SUBPROCESS,
+        Elicitation.NONE,
+        Resume.WARM_REATTACH,
+        EffortFamily.NONE,
+        ModelFamily.MULTI,
+        AuthModel.OWN_AUTH,
+        subagents=False,
+        interrupt=True,
+        streaming=True,
+    )
+    sdk_capability = HarnessCapabilities(
+        IntegrationMode.SDK_IN_PROCESS,
+        Elicitation.NONE,
+        Resume.COLD_ONLY,
+        EffortFamily.NONE,
+        ModelFamily.MULTI,
+        AuthModel.OWN_AUTH,
+        subagents=False,
+        interrupt=False,
+        streaming=True,
+    )
+    builtin = HarnessContribution(name="builtin")
+    community = HarnessContribution(
+        name="omnigent-community-test",
+        valid_harnesses=frozenset({"foo", "bar"}),
+        harness_labels={"foo": "Foo", "bar": "Bar"},
+        capabilities={"foo": cli_capability, "bar": sdk_capability},
+    )
+    monkeypatch.setattr(
+        server_app,
+        "plugin_state",
+        lambda: HarnessPluginState((builtin, community), {}),
+    )
+    monkeypatch.setattr(server_app, "valid_harnesses", lambda: frozenset({"foo", "bar"}))
+    monkeypatch.setattr(_omnigent_compat, "OMNIGENT_HARNESSES", frozenset({"foo", "bar"}))
+    monkeypatch.setattr(
+        _omnigent_compat, "_OMNIGENT_ACCEPTED_HARNESSES", frozenset({"foo", "bar"})
+    )
+
+    server_app._ensure_default_community_cli_harness_agents(
+        seed_stores.agent_store,
+        seed_stores.artifact_store,
+        seed_stores.agent_cache,
+    )
+
+    seeded = seed_stores.agent_store.get_by_name("foo")
+    assert seeded is not None
+    assert seeded.id == builtin_agent_id("foo")
+    assert seeded.session_id is None
+    assert seed_stores.agent_store.get_by_name("bar") is None
+    loaded = seed_stores.agent_cache.load(seeded.id, seeded.bundle_location, expand_env=False)
+    assert loaded.spec.name == "foo"
+    assert loaded.spec.executor.config.get("harness") == "foo"
+    assert loaded.spec.os_env is not None
+    assert loaded.spec.os_env.type == "caller_process"
+
+
 def test_ensure_default_qwen_agent_seeds_card(seed_stores: _SeedStores) -> None:
     """
     Seeding registers qwen-native-ui as a built-in the picker can render.

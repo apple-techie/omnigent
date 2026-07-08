@@ -86,12 +86,13 @@ RUN npm run build
 FROM python:${PYTHON_VERSION}-slim AS builder
 
 ARG PYPI_INDEX_URL=https://pypi.org/simple
+ARG OMNIGENT_DROID_HARNESS_REF=
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends build-essential \
+ && apt-get install -y --no-install-recommends build-essential git \
  && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --index-url ${PYPI_INDEX_URL} --no-cache-dir uv
@@ -126,6 +127,15 @@ ENV VIRTUAL_ENV=/opt/venv \
 # [tool.uv.sources]. The runtime stages preserve /build/ so the venv's
 # .pth references stay valid.
 RUN uv pip install --no-cache-dir --index-url ${PYPI_INDEX_URL} -e .
+
+# Optional community Droid harness plugin for deployments that want the
+# `harness: droid` entry point in both server catalogs and host images. Kept
+# opt-in so stock Omnigent images do not depend on the external Factory CLI
+# integration package.
+RUN if [ -n "${OMNIGENT_DROID_HARNESS_REF}" ]; then \
+        uv pip install --no-cache-dir --no-deps --index-url ${PYPI_INDEX_URL} \
+          "git+https://github.com/apple-techie/omnigent-community-harness-droid.git@${OMNIGENT_DROID_HARNESS_REF}"; \
+    fi
 
 # ── Server builder ──────────────────────────────────────
 # Server-only additions on top of the shared builder: the SPA bundle

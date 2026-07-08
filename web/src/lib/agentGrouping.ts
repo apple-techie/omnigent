@@ -65,6 +65,24 @@ export function sortAgentsForDisplay<T extends AvailableAgent>(agents: readonly 
 }
 
 /**
+ * Return true when a catalog row represents a startable harness directly.
+ *
+ * Native terminal wrappers are identified separately in nativeCodingAgents.
+ * This covers community CLI harnesses that the server seeds as normal built-in
+ * agents using the harness id as the agent name (for example ``droid``).
+ */
+export function isStandaloneHarnessAgent(
+  agent: Pick<AvailableAgent, "name" | "harness">,
+  harnessLabels: Record<string, string>,
+): boolean {
+  return (
+    agent.harness != null &&
+    agent.name === agent.harness &&
+    Object.prototype.hasOwnProperty.call(harnessLabels, agent.harness)
+  );
+}
+
+/**
  * Sort then split agents into the built-in group and the custom group,
  * for rendering with a divider between. Built-ins are the
  * {@link BUILTIN_AGENTS} slugs; everything else is custom.

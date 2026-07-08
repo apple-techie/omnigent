@@ -66,7 +66,7 @@ import { readLastHarness, writeLastHarness } from "@/lib/harnessPreferences";
 import { readHarnessOptions, writeHarnessOption } from "@/lib/modePreferences";
 import { useBrainHarnessLabels } from "@/lib/agentLabels";
 import { CLAUDE_NATIVE_MODELS } from "@/lib/claudeNativeModels";
-import { sortAgentsForDisplay } from "@/lib/agentGrouping";
+import { isStandaloneHarnessAgent, sortAgentsForDisplay } from "@/lib/agentGrouping";
 import { cn } from "@/lib/utils";
 import {
   isNativeCodingAgent,
@@ -1757,16 +1757,25 @@ export function NewChatLandingScreen() {
     [agents],
   );
 
-  // Split the picker into "Harnesses" (the native terminal CLIs) and
-  // "Agents" (SDK / bundle agents like Polly & Debby plus any custom
-  // user-registered agents). This is the isNativeCodingAgent split, NOT the
+  // Split the picker into "Harnesses" (native terminal CLIs plus standalone
+  // community CLI harness agents) and "Agents" (SDK / bundle agents like Polly
+  // & Debby plus any custom user-registered agents). This is NOT the
   // builtins/customs split: Polly & Debby are built-ins but belong under
   // "Agents", not "Harnesses".
   const harnessEntries = useMemo(
-    () => agentList.filter((a) => isNativeCodingAgent(a)),
-    [agentList],
+    () =>
+      agentList.filter(
+        (a) => isNativeCodingAgent(a) || isStandaloneHarnessAgent(a, brainHarnessLabels),
+      ),
+    [agentList, brainHarnessLabels],
   );
-  const agentEntries = useMemo(() => agentList.filter((a) => !isNativeCodingAgent(a)), [agentList]);
+  const agentEntries = useMemo(
+    () =>
+      agentList.filter(
+        (a) => !isNativeCodingAgent(a) && !isStandaloneHarnessAgent(a, brainHarnessLabels),
+      ),
+    [agentList, brainHarnessLabels],
+  );
 
   // "Create custom agent" dialog state and pending bundle. When the user
   // creates a custom agent via the dialog, the bundle input is stored
