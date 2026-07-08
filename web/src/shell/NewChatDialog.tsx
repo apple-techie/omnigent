@@ -1859,14 +1859,14 @@ export function NewChatLandingScreen() {
   const [pickedAgentId, setPickedAgentId] = useState<string | null>(
     () => draftNullableString(landingDraft?.pickedAgentId) ?? readLastAgentId(),
   );
-  const [selectedHostId, setSelectedHostId] = useState<string | null>(
-    () => draftNullableString(landingDraft?.selectedHostId),
+  const [selectedHostId, setSelectedHostId] = useState<string | null>(() =>
+    draftNullableString(landingDraft?.selectedHostId),
   );
   // True when the user picked the sandbox option instead of a connected
   // host — the server provisions a sandbox host at create time
   // (host_type: "managed"), so no host_id or workspace is sent.
-  const [sandboxSelected, setSandboxSelected] = useState(
-    () => draftBoolean(landingDraft?.sandboxSelected),
+  const [sandboxSelected, setSandboxSelected] = useState(() =>
+    draftBoolean(landingDraft?.sandboxSelected),
   );
   // Desktop-shell host status for THIS machine (null outside Electron), so the
   // picker can tag the current machine and offer to auto-connect it.
@@ -1879,11 +1879,11 @@ export function NewChatLandingScreen() {
   // Sandbox repository inputs — composed into the managed create's
   // `workspace` string (`<url>[#<branch>]`); both blank = empty
   // server-created workspace.
-  const [sandboxRepoUrl, setSandboxRepoUrl] = useState<string>(
-    () => draftString(landingDraft?.sandboxRepoUrl),
+  const [sandboxRepoUrl, setSandboxRepoUrl] = useState<string>(() =>
+    draftString(landingDraft?.sandboxRepoUrl),
   );
-  const [sandboxRepoBranch, setSandboxRepoBranch] = useState<string>(
-    () => draftString(landingDraft?.sandboxRepoBranch),
+  const [sandboxRepoBranch, setSandboxRepoBranch] = useState<string>(() =>
+    draftString(landingDraft?.sandboxRepoBranch),
   );
   const [workspace, setWorkspace] = useState<string>(() => draftString(landingDraft?.workspace));
   const [branchName, setBranchName] = useState<string>(() => draftString(landingDraft?.branchName));
@@ -1892,8 +1892,8 @@ export function NewChatLandingScreen() {
   // at. When `branchName` still equals this, the session starts directly in
   // that worktree (no git opts). Editing the field away from it means the user
   // wants a *new* worktree off that name.
-  const [prefilledBranch, setPrefilledBranch] = useState<string>(
-    () => draftString(landingDraft?.prefilledBranch),
+  const [prefilledBranch, setPrefilledBranch] = useState<string>(() =>
+    draftString(landingDraft?.prefilledBranch),
   );
   // Project to file the new session under (an implicit collection stored as a
   // conversation_labels row). Empty = unfiled. Applied right after create.
@@ -1910,27 +1910,27 @@ export function NewChatLandingScreen() {
   // Permission mode for Claude Code (claude --permission-mode). Only
   // meaningful for the claude-native wrapper; ignored otherwise. Lives in
   // the footer tray's Advanced settings menu.
-  const [permissionMode, setPermissionMode] = useState<string>(
-    () => draftString(landingDraft?.permissionMode, CLAUDE_NATIVE_DEFAULT_PERMISSION_MODE),
+  const [permissionMode, setPermissionMode] = useState<string>(() =>
+    draftString(landingDraft?.permissionMode, CLAUDE_NATIVE_DEFAULT_PERMISSION_MODE),
   );
   // Approval mode for Codex (codex --approval-mode). Only meaningful for
   // the codex-native wrapper; ignored otherwise. Lives in the footer
   // tray's Advanced settings menu.
-  const [approvalMode, setApprovalMode] = useState<string>(
-    () => draftString(landingDraft?.approvalMode, CODEX_NATIVE_DEFAULT_APPROVAL_MODE),
+  const [approvalMode, setApprovalMode] = useState<string>(() =>
+    draftString(landingDraft?.approvalMode, CODEX_NATIVE_DEFAULT_APPROVAL_MODE),
   );
   // DANGEROUS codex full-bypass opt-in (Codex only). OFF by default and only
   // flippable on after the user types the confirmation phrase, so it can
   // never be enabled by an accidental click. Persisted as a conversation
   // label so it survives reload. When on, a persistent red banner warns and
   // the runner ignores the approval-mode preset's flags.
-  const [bypassSandbox, setBypassSandbox] = useState<boolean>(
-    () => draftBoolean(landingDraft?.bypassSandbox),
+  const [bypassSandbox, setBypassSandbox] = useState<boolean>(() =>
+    draftBoolean(landingDraft?.bypassSandbox),
   );
   // Execution mode for Cursor (cursor-agent --mode / --yolo). Only meaningful
   // for the cursor-native wrapper; ignored otherwise.
-  const [cursorExecMode, setCursorExecMode] = useState<string>(
-    () => draftString(landingDraft?.cursorExecMode, CURSOR_NATIVE_DEFAULT_EXEC_MODE),
+  const [cursorExecMode, setCursorExecMode] = useState<string>(() =>
+    draftString(landingDraft?.cursorExecMode, CURSOR_NATIVE_DEFAULT_EXEC_MODE),
   );
   // Per-session brain-harness override for bundle agents (polly / debby).
   // null = the agent spec's declared harness (no override sent). On agent
@@ -1954,8 +1954,8 @@ export function NewChatLandingScreen() {
   // Per-session cost-control switch ("Cost Optimized" pill). Unset
   // (null) defers to the agent spec's default and is omitted from
   // the create body.
-  const [costControlMode, _setCostControlMode] = useState<CostControlMode>(
-    () => draftCostControlMode(landingDraft?.costControlMode),
+  const [costControlMode, _setCostControlMode] = useState<CostControlMode>(() =>
+    draftCostControlMode(landingDraft?.costControlMode),
   );
   // Model selection and smart routing are mutually exclusive: enabling
   // routing clears the explicit model pick, and picking a model turns
@@ -2714,9 +2714,7 @@ export function NewChatLandingScreen() {
       // terminal agents keep plain text — their CLI owns slash commands.
       setPendingInitialPrompt(data.id, {
         text: initialPrompt,
-        skill: isNativeTerminalAgent
-          ? null
-          : matchSkillInvocation(initialPrompt, agentSkills),
+        skill: isNativeTerminalAgent ? null : matchSkillInvocation(initialPrompt, agentSkills),
         files,
       });
       // Scope the recall entry to the new session id so ArrowUp surfaces it in
