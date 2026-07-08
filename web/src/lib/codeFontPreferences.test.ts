@@ -183,6 +183,23 @@ describe("codeFontPreferences — pub/sub", () => {
     unsubscribe();
   });
 
+  it("notifies subscribers when another tab changes the stored size", () => {
+    const cb = vi.fn();
+    const unsubscribe = subscribeCodeFont(cb);
+
+    localStorage.setItem(SIZE_STORAGE_KEY, JSON.stringify(17));
+    window.dispatchEvent(
+      new StorageEvent("storage", {
+        key: SIZE_STORAGE_KEY,
+        newValue: JSON.stringify(17),
+        storageArea: localStorage,
+      }),
+    );
+    expect(cb).toHaveBeenCalledWith({ sizePx: 17, family: "" });
+
+    unsubscribe();
+  });
+
   it("emits the intended size even when the storage write throws", () => {
     const cb = vi.fn();
     const unsubscribe = subscribeCodeFont(cb);

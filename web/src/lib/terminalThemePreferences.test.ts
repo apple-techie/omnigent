@@ -90,4 +90,21 @@ describe("terminalThemePreferences — pub/sub", () => {
     writeTerminalThemeMode("light");
     expect(cb).not.toHaveBeenCalled();
   });
+
+  it("notifies subscribers when another tab changes the stored mode", () => {
+    const cb = vi.fn();
+    const unsubscribe = subscribeTerminalTheme(cb);
+
+    localStorage.setItem(STORAGE_KEY, "dark");
+    window.dispatchEvent(
+      new StorageEvent("storage", {
+        key: STORAGE_KEY,
+        newValue: "dark",
+        storageArea: localStorage,
+      }),
+    );
+    expect(cb).toHaveBeenCalledWith("dark");
+
+    unsubscribe();
+  });
 });

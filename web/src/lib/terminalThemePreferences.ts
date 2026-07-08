@@ -100,8 +100,19 @@ const listeners = new Set<TerminalThemeListener>();
  */
 export function subscribeTerminalTheme(listener: TerminalThemeListener): () => void {
   listeners.add(listener);
+  const onStorage = (event: StorageEvent) => {
+    if (event.storageArea && event.storageArea !== window.localStorage) return;
+    if (event.key !== STORAGE_KEY) return;
+    listener(readTerminalThemeMode());
+  };
+  if (typeof window !== "undefined") {
+    window.addEventListener("storage", onStorage);
+  }
   return () => {
     listeners.delete(listener);
+    if (typeof window !== "undefined") {
+      window.removeEventListener("storage", onStorage);
+    }
   };
 }
 

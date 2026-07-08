@@ -185,8 +185,19 @@ const listeners = new Set<CodeFontListener>();
  */
 export function subscribeCodeFont(listener: CodeFontListener): () => void {
   listeners.add(listener);
+  const onStorage = (event: StorageEvent) => {
+    if (event.storageArea && event.storageArea !== window.localStorage) return;
+    if (event.key !== SIZE_STORAGE_KEY && event.key !== FAMILY_STORAGE_KEY) return;
+    listener(readCodeFont());
+  };
+  if (typeof window !== "undefined") {
+    window.addEventListener("storage", onStorage);
+  }
   return () => {
     listeners.delete(listener);
+    if (typeof window !== "undefined") {
+      window.removeEventListener("storage", onStorage);
+    }
   };
 }
 

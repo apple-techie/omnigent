@@ -161,12 +161,14 @@ def test_code_font_size_step_applies_to_monaco_and_persists(
 def test_code_font_size_applies_to_terminal_control_mode(
     page: Page, terminal_session: tuple[str, str]
 ) -> None:
-    """A mounted TerminalView reads the saved code font and renders control mode.
+    """A mounted TerminalView reads and live-updates the terminal code font.
 
     This is the browser-flow counterpart to the TerminalSession unit coverage:
     seed the code-font preference before opening a real shell, then verify the
-    actual xterm DOM comes up at that size. The same opened shell also proves
-    the control-mode presentation path is active: control transport gives xterm
+    actual TerminalSession mount comes up at that size. Then simulate another
+    tab changing the same preference via a storage event and verify the mounted
+    terminal updates without reconnecting. The same opened shell also proves the
+    control-mode presentation path is active: control transport gives xterm
     native selection, so the PTY-only selection hint bar must not render.
     """
     base_url, session_id = terminal_session
@@ -185,8 +187,20 @@ def test_code_font_size_applies_to_terminal_control_mode(
     # TerminalSession owns the xterm instance; it marks its mount node with the
     # font it read and applied so the E2E can assert the real construction path
     # without depending on xterm's renderer internals.
-    mount = terminal_view.locator('[data-code-font-size="17"]').first
-    expect(mount).to_be_visible(timeout=20_000)
+    mount = terminal_view.locator("[data-code-font-size]").first
+    expect(mount).to_have_attribute("data-code-font-size", "17", timeout=20_000)
+
+    page.evaluate(
+        f"""() => {{
+          window.localStorage.setItem('{STORAGE_KEY}', JSON.stringify(19));
+          window.dispatchEvent(new StorageEvent('storage', {{
+            key: '{STORAGE_KEY}',
+            newValue: JSON.stringify(19),
+            storageArea: window.localStorage,
+          }}));
+        }}"""
+    )
+    expect(mount).to_have_attribute("data-code-font-size", "19", timeout=10_000)
 
 
 def test_code_font_size_steppers_clamp_at_bounds(

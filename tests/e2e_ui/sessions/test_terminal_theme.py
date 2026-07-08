@@ -72,11 +72,9 @@ def _open_new_shell(page: Page) -> None:
 
 
 def _connected_main_terminal(page: Page):
-    """Wait for a freshly opened shell's xterm to mount + connect in the main view."""
-    main_terminal = page.get_by_test_id("main-terminal-view")
-    expect(main_terminal).to_be_visible(timeout=60_000)
-    terminal_view = main_terminal.get_by_test_id("terminal-view").last
-    expect(terminal_view).to_be_visible(timeout=20_000)
+    """Wait for a freshly opened shell's xterm to mount + connect."""
+    terminal_view = page.get_by_test_id("terminal-view").last
+    expect(terminal_view).to_be_visible(timeout=60_000)
     expect(terminal_view).to_have_attribute("data-state", "connected", timeout=20_000)
     return terminal_view
 
@@ -108,11 +106,14 @@ def test_light_terminal_under_dark_app(page: Page, terminal_session: tuple[str, 
 
 
 def test_dark_terminal_under_light_app(page: Page, terminal_session: tuple[str, str]) -> None:
-    """A "Dark" terminal stays dark while the app runs Light.
+    """A "Dark" terminal stays dark while the app runs Light, then updates live.
 
     The mirror of the light-on-dark case: pin the app to Light and the terminal to
     Dark, launch a shell, and confirm the terminal resolves to dark
-    (``data-terminal-theme=dark``) with no ``dark`` class on ``<html>``.
+    (``data-terminal-theme=dark``) with no ``dark`` class on ``<html>``. Then
+    simulate another tab changing the terminal theme to Light via the same
+    storage event browsers emit cross-tab; the mounted TerminalView must
+    re-resolve to light without remounting.
     """
     base_url, session_id = terminal_session
 
@@ -128,6 +129,19 @@ def test_dark_terminal_under_light_app(page: Page, terminal_session: tuple[str, 
 
     expect(terminal_view).to_have_attribute("data-terminal-theme", "dark")
     assert not _html_has_dark(page), "app theme must stay light while the terminal is dark"
+
+    page.evaluate(
+        f"""() => {{
+          window.localStorage.setItem('{TERMINAL_THEME_KEY}', 'light');
+          window.dispatchEvent(new StorageEvent('storage', {{
+            key: '{TERMINAL_THEME_KEY}',
+            newValue: 'light',
+            storageArea: window.localStorage,
+          }}));
+        }}"""
+    )
+    expect(terminal_view).to_have_attribute("data-terminal-theme", "light", timeout=10_000)
+    assert not _html_has_dark(page), "live terminal theme changes must not flip the app theme"
 
 
 def test_terminal_theme_control_defaults_and_persists(
