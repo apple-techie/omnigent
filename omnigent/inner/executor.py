@@ -131,6 +131,23 @@ class ReasoningChunk(ExecutorEvent):
 
 
 @dataclass
+class ProgressEvent(ExecutorEvent):
+    """Non-user-visible progress from an active executor turn.
+
+    Some SDKs surface semantically meaningful stream activity that should
+    keep the harness turn alive but should not become assistant text or a
+    persisted conversation item. The adapter maps this to
+    ``response.in_progress``.
+
+    :param source: Backend identifier, useful for logs/tests.
+    :param detail: Optional provider event type or short reason.
+    """
+
+    source: str
+    detail: str | None = None
+
+
+@dataclass
 class ToolCallRequest(ExecutorEvent):
     """The LLM wants to call a tool.
 

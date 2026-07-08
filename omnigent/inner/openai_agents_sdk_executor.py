@@ -37,6 +37,7 @@ from .executor import (
     ExecutorError,
     ExecutorEvent,
     Message,
+    ProgressEvent,
     TextChunk,
     ToolCallComplete,
     ToolCallRequest,
@@ -64,6 +65,21 @@ _DATABRICKS_OPENAI_AGENTS_DEFAULT_MODEL = "databricks-gpt-5-5"
 # transient is rare.
 _EMPTY_TURN_MAX_ATTEMPTS = 2
 _SDK_SESSION_GET_ITEMS_TIMEOUT = 5.0
+_RAW_STREAM_PROGRESS_INTERVAL_S = 30.0
+
+_RAW_STREAM_PROGRESS_TYPES: frozenset[str] = frozenset(
+    {
+        "response.created",
+        "response.in_progress",
+        "response.output_item.added",
+        "response.output_item.done",
+        "response.function_call_arguments.delta",
+        "response.function_call_arguments.done",
+        "response.reasoning.started",
+        "response.reasoning_text.delta",
+        "response.reasoning_summary_text.delta",
+    }
+)
 
 # SDK ``RunItem.type`` values that are bookkeeping, not user-visible
 # output. A turn whose only new items are these (and which produced no
@@ -1578,6 +1594,7 @@ class OpenAIAgentsSDKExecutor(Executor):
         for attempt in range(_EMPTY_TURN_MAX_ATTEMPTS):
             response_text = ""
             pending_tools: dict[str, tuple[str, float]] = {}
+            last_raw_progress_at = 0.0
             saw_tool_activity = False
             result = None
             # Per-turn unbounded queue bridging the stream-pump task
@@ -1620,11 +1637,23 @@ class OpenAIAgentsSDKExecutor(Executor):
                     if event.type == "raw_response_event":
                         raw_event = cast(_RawResponseEvent, event)
                         data = raw_event.data
-                        if data.type == "response.output_text.delta":
+                        raw_type = getattr(data, "type", "")
+                        if raw_type == "response.output_text.delta":
                             text = data.delta
                             if text:
                                 response_text += text
                                 yield TextChunk(text=text)
+                        elif raw_type in _RAW_STREAM_PROGRESS_TYPES:
+                            now = time.monotonic()
+                            if (
+                                last_raw_progress_at <= 0.0
+                                or now - last_raw_progress_at >= _RAW_STREAM_PROGRESS_INTERVAL_S
+                            ):
+                                last_raw_progress_at = now
+                                yield ProgressEvent(
+                                    source="openai_agents_sdk",
+                                    detail=raw_type,
+                                )
 
                     elif event.type == "run_item_stream_event":
                         item_event = cast(_RunItemEvent, event)
@@ -1667,6 +1696,28 @@ class OpenAIAgentsSDKExecutor(Executor):
                                 error=classification.error,
                                 duration_ms=duration_ms,
                                 metadata={"call_id": call_id} if call_id else {},
+                            )
+                        elif sdk_item.type == "reasoning_item":
+                            now = time.monotonic()
+                            if (
+                                last_raw_progress_at <= 0.0
+                                or now - last_raw_progress_at >= _RAW_STREAM_PROGRESS_INTERVAL_S
+                            ):
+                                last_raw_progress_at = now
+                                yield ProgressEvent(
+                                    source="openai_agents_sdk",
+                                    detail="reasoning_item_created",
+                                )
+                    elif event.type == "agent_updated_stream_event":
+                        now = time.monotonic()
+                        if (
+                            last_raw_progress_at <= 0.0
+                            or now - last_raw_progress_at >= _RAW_STREAM_PROGRESS_INTERVAL_S
+                        ):
+                            last_raw_progress_at = now
+                            yield ProgressEvent(
+                                source="openai_agents_sdk",
+                                detail="agent_updated_stream_event",
                             )
 
                 # Producer signalled completion via _STREAM_DONE.

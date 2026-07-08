@@ -21,6 +21,7 @@ import databricks.sdk.config as _sdk_config_mod
 from omnigent.inner.executor import (
     ExecutorConfig,
     ExecutorError,
+    ProgressEvent,
     TextChunk,
     ToolCallComplete,
     ToolCallRequest,
@@ -80,6 +81,12 @@ class _FakeToolOutputItem:
 class _FakeRawTextDelta:
     delta: str
     type: str = "response.output_text.delta"
+
+
+@dataclass
+class _FakeRawProgress:
+    type: str
+    delta: str = ""
 
 
 @dataclass
@@ -500,6 +507,40 @@ class TestOpenAIAgentsSDKExecutor(unittest.TestCase):
             self.assertIsNone(
                 _FakeRunner.last_calls[0]["agent"].model_settings.parallel_tool_calls
             )
+
+        _run(_t())
+
+    def test_raw_responses_progress_event_keeps_turn_alive(self):
+        async def _t():
+            _FakeRunner.last_calls = []
+            _FakeRunner.next_result = _FakeResult(
+                events=[
+                    _FakeRawEvent(_FakeRawProgress("response.in_progress")),
+                    _FakeRawEvent(_FakeRawProgress("response.function_call_arguments.delta")),
+                ],
+                final_output="done",
+                raw_responses=[_nonempty_raw_response()],
+            )
+            executor = OpenAIAgentsSDKExecutor(client=object())
+            with patch(
+                "omnigent.inner.openai_agents_sdk_executor._ensure_agents_sdk",
+                return_value=_fake_agents_sdk(),
+            ):
+                events = [
+                    e
+                    async for e in executor.run_turn(
+                        [{"role": "user", "content": "hi", "session_id": "s1"}],
+                        [],
+                        "Be helpful.",
+                    )
+                ]
+
+            progress_events = [e for e in events if isinstance(e, ProgressEvent)]
+            self.assertEqual(len(progress_events), 1)
+            self.assertEqual(progress_events[0].source, "openai_agents_sdk")
+            self.assertEqual(progress_events[0].detail, "response.in_progress")
+            self.assertIsInstance(events[-1], TurnComplete)
+            self.assertEqual(events[-1].response, "done")
 
         _run(_t())
 

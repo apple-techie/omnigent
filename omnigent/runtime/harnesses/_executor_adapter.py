@@ -37,6 +37,7 @@ import contextlib
 import json
 import logging
 import secrets
+import time
 import uuid
 from collections import deque
 from collections.abc import Callable
@@ -52,6 +53,7 @@ from omnigent.inner.executor import (
     ExecutorError,
     ExecutorEvent,
     Message,
+    ProgressEvent,
     ReasoningChunk,
     TextChunk,
     ToolCallComplete,
@@ -66,12 +68,14 @@ from omnigent.runtime.tool_output import cap_tool_output
 from omnigent.server.schemas import (
     CreateResponseRequest,
     ElicitationRequestParams,
+    InProgressEvent,
     InjectionConsumedEvent,
     OutputItemDoneEvent,
     OutputTextDeltaEvent,
     ReasoningStartedEvent,
     ReasoningSummaryTextDeltaEvent,
     ReasoningTextDeltaEvent,
+    ResponseObject,
 )
 
 _logger = logging.getLogger(__name__)
@@ -848,6 +852,18 @@ class ExecutorAdapter(HarnessApp):
                 OutputTextDeltaEvent(
                     type="response.output_text.delta",
                     delta=event.text,
+                )
+            )
+        elif isinstance(event, ProgressEvent):
+            ctx.emit(
+                InProgressEvent(
+                    type="response.in_progress",
+                    response=ResponseObject(
+                        id=ctx.response_id,
+                        status="in_progress",
+                        model=self._current_agent or "unknown",
+                        created_at=int(time.time()),
+                    ),
                 )
             )
         elif isinstance(event, ReasoningChunk):

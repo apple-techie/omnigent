@@ -1514,6 +1514,54 @@ async def test_executor_adapter_builds_config_from_request() -> None:
 
 
 @pytest.mark.asyncio
+async def test_executor_adapter_translates_progress_event_to_in_progress() -> None:
+    """Executor progress emits response.in_progress for the idle watchdog."""
+    from omnigent.inner.executor import (
+        Executor,
+        ExecutorConfig,
+        Message,
+        ProgressEvent,
+        ToolSpec,
+        TurnComplete,
+    )
+    from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
+    from omnigent.runtime.harnesses._scaffold import TurnContext
+    from omnigent.server.schemas import CreateResponseRequest, InProgressEvent
+
+    class _ProgressExecutor(Executor):
+        async def run_turn(
+            self,
+            messages: list[Message],
+            tools: list[ToolSpec],
+            system_prompt: str,
+            config: ExecutorConfig | None = None,
+        ):
+            yield ProgressEvent(source="test", detail="response.in_progress")
+            yield TurnComplete(response="ok")
+
+    import asyncio
+
+    ctx = TurnContext(
+        response_id="resp_progress", event_queue=asyncio.Queue(), cancelled=asyncio.Event()
+    )
+    adapter = ExecutorAdapter(executor_factory=lambda: _ProgressExecutor())
+    request = CreateResponseRequest(model="openai_parent", input="hi")
+
+    await adapter.run_turn(request, ctx)
+
+    events = []
+    while not ctx._event_queue.empty():
+        events.append(ctx._event_queue.get_nowait())
+
+    progress_events = [event for event in events if isinstance(event, InProgressEvent)]
+    assert len(progress_events) == 1
+    assert progress_events[0].type == "response.in_progress"
+    assert progress_events[0].response.id == "resp_progress"
+    assert progress_events[0].response.status == "in_progress"
+    assert progress_events[0].response.model == "openai_parent"
+
+
+@pytest.mark.asyncio
 async def test_executor_adapter_forwards_model_override_to_config() -> None:
     """``request.model_override`` is threaded into ``ExecutorConfig.model``.
 
