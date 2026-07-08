@@ -26,6 +26,7 @@ import re
 import shutil
 from collections.abc import Iterator
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
@@ -172,6 +173,16 @@ def test_code_font_size_applies_to_terminal_control_mode(
     native selection, so the PTY-only selection hint bar must not render.
     """
     base_url, session_id = terminal_session
+    attach_urls: list[str] = []
+
+    page.on(
+        "websocket",
+        lambda ws: (
+            attach_urls.append(ws.url)
+            if f"/v1/sessions/{session_id}/resources/terminals/" in ws.url and "/attach" in ws.url
+            else None
+        ),
+    )
 
     page.goto(base_url)
     page.evaluate(f"() => window.localStorage.setItem('{STORAGE_KEY}', '17')")
@@ -183,6 +194,11 @@ def test_code_font_size_applies_to_terminal_control_mode(
     # Control-mode terminals omit the legacy PTY selection hint because xterm
     # owns selection and copy directly.
     expect(terminal_view.get_by_test_id("terminal-selection-hint")).to_have_count(0)
+    assert attach_urls, "terminal opened without creating a terminal attach WebSocket"
+    attach = urlparse(attach_urls[-1])
+    assert parse_qs(attach.query).get("transport") == ["control"], (
+        f"expected control-mode terminal attach URL, got {attach_urls}"
+    )
 
     # TerminalSession owns the xterm instance; it marks its mount node with the
     # font it read and applied so the E2E can assert the real construction path

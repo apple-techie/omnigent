@@ -353,11 +353,13 @@ def test_idle_notification_uses_electron_native_bridge(
     """
     Under the Electron shell bridge, a settled background turn-end is sent to
     ``window.omnigentDesktop.notify`` with a click navigation path, not to the
-    browser ``Notification`` constructor.
+    browser ``Notification`` constructor; the shell click callback then routes
+    the SPA to that conversation.
 
     This covers the desktop notification flow that differs from a plain browser:
     the web bundle detects the injected native bridge, skips browser permission
-    gating, forwards ``navigatePath`` over IPC, and lets the shell own the OS
+    gating, forwards ``navigatePath`` over IPC, registers the shell's
+    notification-activation menu/click callback, and lets the shell own the OS
     toast.
 
     The status transition is deterministic: the initial ``GET /v1/sessions``
@@ -410,6 +412,7 @@ def test_idle_notification_uses_electron_native_bridge(
     page.route_web_socket(re.compile(r"/v1/sessions/updates"), handle_updates_socket)
     page.goto(base_url)
     expect(page.get_by_text(title)).to_be_visible(timeout=30_000)
+    page.wait_for_function("window.__nativeNotificationHandlers.length === 1", timeout=10_000)
 
     page.evaluate(
         "window.__hidden = true;"
@@ -447,6 +450,14 @@ def test_idle_notification_uses_electron_native_bridge(
     assert page.evaluate("window.__notifs.length") == 0, (
         "Electron native shell should not also construct a browser Notification"
     )
+
+    page.evaluate(
+        """(path) => {
+          window.__nativeNotificationHandlers[0](path);
+        }""",
+        f"/c/{session_id}",
+    )
+    expect(page).to_have_url(re.compile(rf"/c/{re.escape(session_id)}$"), timeout=10_000)
 
 
 def test_idle_notification_click_navigates_to_chat(
