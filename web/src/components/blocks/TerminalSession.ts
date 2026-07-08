@@ -287,6 +287,7 @@ export function applyTerminalCopy(
  * close the WS, dispose the terminal.
  */
 export class TerminalSession {
+  private readonly container: HTMLElement;
   private readonly term: Terminal;
   private readonly fit: FitAddon;
   /** WebGL renderer addon, or ``null`` when WebGL is unavailable. */
@@ -337,11 +338,13 @@ export class TerminalSession {
     onInput?: TerminalInputListener,
     nativeSelection = false,
   ) {
+    this.container = container;
     // Read the user's code-font preference (Settings → Appearance) at
     // construction; a mid-session change is applied live via setFont(). The
     // xterm.js defaults (15px, no theme) feel out of place inside the app
     // chrome, so an unset family falls back to the shared mono stack.
     const { sizePx, family } = readCodeFont();
+    this.markAppliedFont(sizePx, family);
     this.term = new Terminal({
       fontFamily: codeFontFamilyForEditor(family),
       fontSize: sizePx,
@@ -512,7 +515,13 @@ export class TerminalSession {
   setFont(sizePx: number, family: string): void {
     this.term.options.fontFamily = codeFontFamilyForEditor(family);
     this.term.options.fontSize = sizePx;
+    this.markAppliedFont(sizePx, family);
     this.sendResize();
+  }
+
+  private markAppliedFont(sizePx: number, family: string): void {
+    this.container.dataset.codeFontSize = String(sizePx);
+    this.container.dataset.codeFontFamily = family;
   }
 
   /**

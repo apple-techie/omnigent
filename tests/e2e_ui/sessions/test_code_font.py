@@ -22,6 +22,7 @@ the size is a pure client-side preference.
 
 from __future__ import annotations
 
+import re
 import shutil
 from collections.abc import Iterator
 from pathlib import Path
@@ -29,6 +30,8 @@ from pathlib import Path
 import httpx
 import pytest
 from playwright.sync_api import Locator, Page, expect
+
+from tests.e2e_ui.conftest import open_right_rail
 
 STORAGE_KEY = "omnigent:code-font-size"
 
@@ -89,6 +92,22 @@ def _monaco_font_size(file_viewer: Locator) -> str:
     return file_viewer.locator(".view-lines").first.evaluate("el => getComputedStyle(el).fontSize")
 
 
+def _open_new_shell(page: Page) -> None:
+    """Open the Shells rail and launch the declared zsh shell."""
+    open_right_rail(page)
+    rail = page.get_by_role("complementary", name="Workspace")
+    rail.get_by_role("tab", name=re.compile("Shells")).click()
+    rail.get_by_role("button", name="New shell").click()
+
+
+def _connected_terminal_view(page: Page) -> Locator:
+    """Return the connected TerminalView for the opened shell."""
+    terminal_view = page.get_by_test_id("terminal-view").last
+    expect(terminal_view).to_be_visible(timeout=60_000)
+    expect(terminal_view).to_have_attribute("data-state", "connected", timeout=20_000)
+    return terminal_view
+
+
 def test_code_font_size_defaults_apply_to_monaco(
     page: Page, seeded_python: tuple[str, str]
 ) -> None:
@@ -137,6 +156,37 @@ def test_code_font_size_step_applies_to_monaco_and_persists(
     file_viewer = page.locator('[data-testid="file-viewer"]:visible')
     expect(file_viewer.locator(".view-lines")).to_contain_text("greet", timeout=30_000)
     assert _monaco_font_size(file_viewer) == "15px", "size was not restored after reload"
+
+
+def test_code_font_size_applies_to_terminal_control_mode(
+    page: Page, terminal_session: tuple[str, str]
+) -> None:
+    """A mounted TerminalView reads the saved code font and renders control mode.
+
+    This is the browser-flow counterpart to the TerminalSession unit coverage:
+    seed the code-font preference before opening a real shell, then verify the
+    actual xterm DOM comes up at that size. The same opened shell also proves
+    the control-mode presentation path is active: control transport gives xterm
+    native selection, so the PTY-only selection hint bar must not render.
+    """
+    base_url, session_id = terminal_session
+
+    page.goto(base_url)
+    page.evaluate(f"() => window.localStorage.setItem('{STORAGE_KEY}', '17')")
+
+    page.goto(f"{base_url}/c/{session_id}")
+    _open_new_shell(page)
+    terminal_view = _connected_terminal_view(page)
+
+    # Control-mode terminals omit the legacy PTY selection hint because xterm
+    # owns selection and copy directly.
+    expect(terminal_view.get_by_test_id("terminal-selection-hint")).to_have_count(0)
+
+    # TerminalSession owns the xterm instance; it marks its mount node with the
+    # font it read and applied so the E2E can assert the real construction path
+    # without depending on xterm's renderer internals.
+    mount = terminal_view.locator('[data-code-font-size="17"]').first
+    expect(mount).to_be_visible(timeout=20_000)
 
 
 def test_code_font_size_steppers_clamp_at_bounds(
