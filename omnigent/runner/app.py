@@ -18216,12 +18216,16 @@ def create_runner_app(
                 resp = await client.get(f"/v1/sessions/{session_id}/model-options")
                 resp.raise_for_status()
                 data = resp.json()
+                # ACP SessionModelState uses ``modelId``/``name``; the picker
+                # wants ``id``/``displayName``.
+                models = [
+                    {"id": mid, "displayName": m.get("name") or mid}
+                    for m in (data.get("models") or [])
+                    if isinstance(m, dict) and (mid := m.get("modelId") or m.get("id"))
+                ]
                 return JSONResponse(
                     status_code=200,
-                    content={
-                        "models": data.get("models") or [],
-                        "current": data.get("current"),
-                    },
+                    content={"models": models, "current": data.get("current")},
                 )
             except Exception as exc:  # noqa: BLE001 - picker failures are retryable.
                 _logger.warning("ACP model options failed for %s: %s", session_id, exc)
