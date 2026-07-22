@@ -14565,6 +14565,8 @@ def create_runner_app(
                 # changes the model on the SDK harnesses (not just the
                 # readout). Forwarded by the Omnigent server in the message body.
                 model_override=msg_body.get("model_override"),
+                # Raw override still carries the acp:<slug> for agent selection.
+                acp_override=msg_body.get("harness_override"),
             )
             from omnigent.runtime.prompt import build_instructions
 
@@ -19907,7 +19909,13 @@ async def _resolve_harness_config(
             harness = harness_override or spec.executor.config.get("harness") or spec.executor.type
             harness = canonicalize_harness(harness) or harness
             spawn_env = _build_spawn_env_from_spec(
-                spec, harness, cwd=cwd, workdir=workdir, model_override=model_override
+                spec,
+                harness,
+                cwd=cwd,
+                workdir=workdir,
+                model_override=model_override,
+                # Raw (pre-canonicalize) override still carries the acp:<slug>.
+                acp_override=harness_override,
             )
             return harness, spawn_env
 
@@ -19949,6 +19957,7 @@ def _build_spawn_env_from_spec(
     cwd: Path | None = None,
     workdir: Path | None = None,
     model_override: str | None = None,
+    acp_override: str | None = None,
 ) -> dict[str, str] | None:
     """Build spawn-env from spec — mirrors workflow.py's helpers.
 
@@ -20004,7 +20013,9 @@ def _build_spawn_env_from_spec(
         elif harness == "goose":
             env = _build_goose_spawn_env(spec, cwd=cwd, workdir=workdir)
         elif harness == "acp":
-            env = _build_acp_spawn_env(spec, cwd=cwd, workdir=workdir)
+            env = _build_acp_spawn_env(
+                spec, cwd=cwd, workdir=workdir, override_harness=acp_override
+            )
         elif harness == "copilot":
             env = _build_copilot_spawn_env(spec, cwd=cwd, workdir=workdir)
         else:
