@@ -1516,6 +1516,7 @@ def _build_acp_spawn_env(
     *,
     cwd: Path | None = None,
     workdir: Path | None = None,
+    override_harness: str | None = None,
 ) -> dict[str, str]:
     """Build the env-var dict the generic ACP harness wrap reads.
 
@@ -1536,10 +1537,17 @@ def _build_acp_spawn_env(
     :returns: A dict of ``HARNESS_ACP_*`` env-var overrides for the spawn.
     """
     env: dict[str, str] = {}
+    # A per-session harness override (``acp:<slug>`` picked in the UI) selects
+    # the concrete agent and wins over the spec's own ``executor.config.harness``
+    # (the bundle agent whose harness is being overridden — e.g. Polly's
+    # ``claude-sdk``, which carries no acp slug).
     raw_harness = ""
-    cfg = getattr(spec.executor, "config", None)
-    if isinstance(cfg, dict):
-        raw_harness = str(cfg.get("harness") or "")
+    if override_harness and override_harness.startswith("acp:"):
+        raw_harness = override_harness
+    else:
+        cfg = getattr(spec.executor, "config", None)
+        if isinstance(cfg, dict):
+            raw_harness = str(cfg.get("harness") or "")
     slug = raw_harness.split(":", 1)[1] if raw_harness.startswith("acp:") else ""
 
     # Lazily import the config reader — the hot spawn-env path shouldn't pull in
