@@ -899,6 +899,18 @@ class HarnessProcessManager:
         """
         return conversation_id in self._entries
 
+    def existing_client(self, conversation_id: str) -> httpx.AsyncClient | None:
+        """Return the running harness client for *conversation_id*, without spawning.
+
+        Unlike :meth:`get_client`, never starts a subprocess — returns ``None``
+        when no live harness is bound. Used to query a harness (e.g. for its
+        model list) only when it is already running.
+        """
+        entry = self._entries.get(conversation_id)
+        if entry is None or entry.process.returncode is not None:
+            return None
+        return entry.client
+
     def has_active_turn(self, conversation_id: str) -> bool:
         """
         Check whether the given conversation has an in-flight

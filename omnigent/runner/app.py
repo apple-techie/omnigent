@@ -18197,6 +18197,29 @@ def create_runner_app(
             Codex ``model/list`` object.
         """
         harness = _session_harness_name(session_id)
+        if harness == "acp":
+            # ACP agents own their model list (session/new SessionModelState);
+            # ask the running harness subprocess. No live harness yet (no turn
+            # run) -> empty, so the picker simply shows nothing until it loads.
+            if process_manager is None:
+                return JSONResponse(status_code=200, content={"models": []})
+            client = process_manager.existing_client(session_id)
+            if client is None:
+                return JSONResponse(status_code=200, content={"models": []})
+            try:
+                resp = await client.get(f"/v1/sessions/{session_id}/model-options")
+                resp.raise_for_status()
+                data = resp.json()
+                return JSONResponse(
+                    status_code=200,
+                    content={
+                        "models": data.get("models") or [],
+                        "current": data.get("current"),
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001 - picker failures are retryable.
+                _logger.warning("ACP model options failed for %s: %s", session_id, exc)
+                return JSONResponse(status_code=200, content={"models": []})
         if harness not in ("codex-native", "opencode-native"):
             return JSONResponse(status_code=200, content={"models": []})
         if harness == "opencode-native":

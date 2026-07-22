@@ -126,3 +126,22 @@ def test_send_model_flag_forwarded(_isolate_config: Path) -> None:
     )
     env = _build_acp_spawn_env(_make_spec(harness="acp:qwen"))
     assert env["HARNESS_ACP_SEND_MODEL"] == "1"
+
+
+def test_executor_adapter_surfaces_model_options() -> None:
+    """ExecutorAdapter.model_options() reflects the inner executor's model list."""
+    from omnigent.inner.acp_executor import AcpAgentConfig, AcpExecutor
+    from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
+
+    ex = AcpExecutor(AcpAgentConfig(command="fake acp", name="Fake"))
+    ex._model_state = {
+        "availableModels": [{"modelId": "auto"}, {"modelId": "claude-fable-5"}],
+        "currentModelId": "auto",
+    }
+    adapter = ExecutorAdapter(executor_factory=lambda: ex, harness_label="ACP")
+    # No turn yet -> no executor -> empty (picker shows nothing until it loads).
+    assert adapter.model_options() == {"models": [], "current": None}
+    adapter._executor = ex  # simulate post-first-turn
+    opts = adapter.model_options()
+    assert [m["modelId"] for m in opts["models"]] == ["auto", "claude-fable-5"]
+    assert opts["current"] == "auto"

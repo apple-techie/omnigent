@@ -4379,7 +4379,9 @@ export function Composer({
       // read-only hint instead of popping an empty dropdown. ("/model <name>"
       // still routes to setModel there — opencode reads model_override on the
       // next web-injected turn.)
-      const canOpenModelPicker = modelPickerKind !== "opencode" || codexModelOptions.length > 0;
+      const canOpenModelPicker =
+        (modelPickerKind !== "opencode" && modelPickerKind !== "acp") ||
+        codexModelOptions.length > 0;
       if (cmd === "/model" && !arg && showModels && canOpenModelPicker) {
         dirtyRef.current = true;
         setValue("");
@@ -5182,7 +5184,7 @@ const EFFORT_LEVELS = ["low", "medium", "high"] as const;
 /** Anthropic-side efforts for claude-native sessions (matches ANTHROPIC_EFFORTS in reasoning_effort.py). */
 const CLAUDE_NATIVE_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 
-type NativeModelPickerKind = "claude" | "codex" | "cursor" | "kiro" | "opencode" | "pi";
+type NativeModelPickerKind = "claude" | "codex" | "cursor" | "kiro" | "opencode" | "pi" | "acp";
 
 type LabelSource = { labels?: Record<string, string | null> | null } | null | undefined;
 
@@ -5262,6 +5264,11 @@ export function modelPickerKindForConv(
       // ``/model`` picks back to ``model_override`` via the extension's
       // model_select handler, so the picker surfaces that as the live model.
       return "pi";
+    case "acp-native-ui":
+      // Generic-ACP agents (droid, grok, …) advertise a live model list in
+      // their session/new SessionModelState; a pick rides as model_override
+      // and the ACP executor applies it live via session/set_model.
+      return "acp";
     default:
       return null;
   }
@@ -5392,7 +5399,8 @@ function AgentPicker({
     modelPickerKind === "cursor" ||
     modelPickerKind === "kiro" ||
     modelPickerKind === "pi" ||
-    modelPickerKind === "opencode";
+    modelPickerKind === "opencode" ||
+    modelPickerKind === "acp";
   const modelOptions: ReadonlyArray<{ id: string; label?: string; displayName?: string }> =
     modelPickerKind === "claude"
       ? CLAUDE_NATIVE_MODELS
@@ -5437,7 +5445,8 @@ function AgentPicker({
     modelPickerKind === "cursor" ||
     modelPickerKind === "kiro" ||
     modelPickerKind === "opencode" ||
-    modelPickerKind === "pi"
+    modelPickerKind === "pi" ||
+    modelPickerKind === "acp"
       ? sessionModelOverride
       : (sessionModelOverride ?? selectedModel);
   // SDK/bundle agents (no native picker) never have the cross-session sticky

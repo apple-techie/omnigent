@@ -618,6 +618,10 @@ _CURSOR_NATIVE_WRAPPER_LABEL_VALUE = CURSOR_NATIVE_CODING_AGENT.wrapper_label
 _CURSOR_NATIVE_HARNESS = CURSOR_NATIVE_CODING_AGENT.harness
 _KIRO_NATIVE_WRAPPER_LABEL_VALUE = KIRO_NATIVE_CODING_AGENT.wrapper_label
 _PI_NATIVE_WRAPPER_LABEL_VALUE = PI_NATIVE_CODING_AGENT.wrapper_label
+# Generic-ACP sessions aren't a NativeCodingAgent, but they own a model list
+# (ACP SessionModelState) — this wrapper label lets the model-options fetch and
+# the web picker recognize them without a native-agent registration.
+_ACP_WRAPPER_LABEL_VALUE = "acp-native-ui"
 _CLAUDE_NATIVE_MESSAGE_TIMEOUT_S = 30.0
 _NATIVE_TERMINAL_START_FAILED_CODE = "native_terminal_start_failed"
 _NATIVE_TERMINAL_ENSURE_FAILED_CODE = "native_terminal_ensure_failed"
@@ -13233,6 +13237,15 @@ async def _create_session_from_existing_agent(
         _merged.update(_sa_labels)
         await asyncio.to_thread(conversation_store.set_labels, conv.id, _merged)
         conv = await asyncio.to_thread(conversation_store.get_conversation, conv.id)
+    elif conv.harness_override and conv.harness_override.startswith("acp:"):
+        # Generic-ACP session: tag it so the web model picker and the
+        # model-options fetch recognize it — ACP agents own their model list
+        # (SessionModelState) but have no native-agent registration to carry
+        # the wrapper label.
+        _acp_labels = dict(body.labels) if body.labels else {}
+        _acp_labels[_CLAUDE_NATIVE_WRAPPER_LABEL_KEY] = _ACP_WRAPPER_LABEL_VALUE
+        await asyncio.to_thread(conversation_store.set_labels, conv.id, _acp_labels)
+        conv = await asyncio.to_thread(conversation_store.get_conversation, conv.id)
     elif body.labels:
         await asyncio.to_thread(conversation_store.set_labels, conv.id, body.labels)
 
@@ -22234,6 +22247,9 @@ def _model_options_from_wire(raw_models: Any) -> list[dict[str, Any]]:
 _MODEL_OPTIONS_ENDPOINT_BY_WRAPPER: dict[str, str] = {
     _CODEX_NATIVE_WRAPPER_LABEL_VALUE: "codex-model-options",
     _OPENCODE_NATIVE_WRAPPER_LABEL_VALUE: "codex-model-options",
+    # Generic-ACP sessions: the same runner route serves the ACP agent's
+    # SessionModelState (harness branch inside get_session_codex_model_options).
+    _ACP_WRAPPER_LABEL_VALUE: "codex-model-options",
     # pi-native is deliberately NOT here: its catalog is PUSHED by the resident
     # extension (``external_model_options`` → ``_pushed_model_options_cache``),
     # not fetched from a runner route, so the picker works in every auth path
