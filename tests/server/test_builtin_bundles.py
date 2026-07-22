@@ -108,7 +108,17 @@ _SHIPPED_SUB_AGENT_EXAMPLES = [
     (
         "polly",
         app._POLLY_BUNDLE_SOURCE,
-        {"claude_code", "codex", "opencode", "cursor", "hermes", "pi"},
+        {
+            "claude_code",
+            "codex",
+            "opencode",
+            "hermes",
+            "pi",
+            "grok",
+            "droid",
+            "kimi",
+            "antigravity",
+        },
     ),
     ("debby", app._DEBBY_BUNDLE_SOURCE, {"claude", "gpt"}),
 ]
