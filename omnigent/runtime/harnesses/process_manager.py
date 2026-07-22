@@ -911,6 +911,18 @@ class HarnessProcessManager:
             return None
         return entry.client
 
+    def running_harness(self, conversation_id: str) -> str | None:
+        """Return the harness name of the live subprocess, or ``None`` if none.
+
+        The *running* harness, not the session's cached spec — for a session
+        started with a harness override the spec still names the bundle agent's
+        harness, but the subprocess serves the picked one.
+        """
+        entry = self._entries.get(conversation_id)
+        if entry is None or entry.process.returncode is not None:
+            return None
+        return entry.harness
+
     def has_active_turn(self, conversation_id: str) -> bool:
         """
         Check whether the given conversation has an in-flight

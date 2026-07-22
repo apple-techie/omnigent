@@ -18197,7 +18197,13 @@ def create_runner_app(
             Codex ``model/list`` object.
         """
         harness = _session_harness_name(session_id)
-        if harness == "acp":
+        # A harness-override session (e.g. Polly overridden to acp:droid) caches
+        # the bundle agent's spec, so _session_harness_name returns that harness
+        # (claude-sdk), not the picked acp one. Key off the RUNNING subprocess too.
+        running = (
+            process_manager.running_harness(session_id) if process_manager is not None else None
+        )
+        if harness == "acp" or running == "acp":
             # ACP agents own their model list (session/new SessionModelState);
             # ask the running harness subprocess. No live harness yet (no turn
             # run) -> empty, so the picker simply shows nothing until it loads.
