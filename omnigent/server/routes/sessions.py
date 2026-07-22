@@ -86,6 +86,7 @@ from omnigent.entities.permission import SessionPermission
 from omnigent.entities.session_resources import session_resource_view_to_dict
 from omnigent.errors import ElicitationDeclinedError, ErrorCode, OmnigentError
 from omnigent.harness_plugins import (
+    ANTIGRAVITY_NATIVE_CODING_AGENT,
     CLAUDE_NATIVE_CODING_AGENT,
     CODEX_NATIVE_CODING_AGENT,
     CURSOR_NATIVE_CODING_AGENT,
@@ -621,6 +622,7 @@ _CODEX_NATIVE_MODEL = CODEX_NATIVE_CODING_AGENT.agent_name
 _OPENCODE_NATIVE_WRAPPER_LABEL_VALUE = OPENCODE_NATIVE_CODING_AGENT.wrapper_label
 _CURSOR_NATIVE_WRAPPER_LABEL_VALUE = CURSOR_NATIVE_CODING_AGENT.wrapper_label
 _CURSOR_NATIVE_HARNESS = CURSOR_NATIVE_CODING_AGENT.harness
+_ANTIGRAVITY_NATIVE_HARNESS = ANTIGRAVITY_NATIVE_CODING_AGENT.harness
 _KIRO_NATIVE_WRAPPER_LABEL_VALUE = KIRO_NATIVE_CODING_AGENT.wrapper_label
 _PI_NATIVE_WRAPPER_LABEL_VALUE = PI_NATIVE_CODING_AGENT.wrapper_label
 # Generic-ACP sessions aren't a NativeCodingAgent, but they own a model list
@@ -12887,6 +12889,16 @@ def _derive_terminal_launch_args_from_spec(sub_spec: AgentSpec) -> list[str] | N
         if _spec_config_flag_explicitly_disabled(sub_spec, "yolo"):
             return None
         return _validate_terminal_launch_args(["--yolo"])
+    if harness == _ANTIGRAVITY_NATIVE_HARNESS:
+        # agy exposes exactly one pre-emptive control: the all-or-nothing
+        # --dangerously-skip-permissions flag (no --permission-mode analogue).
+        # Mirror claude-native's opt-in-verbatim contract — translate only an
+        # explicit bypassPermissions so a headless polly worker doesn't stall
+        # on agy's request-review TUI prompt (unanswerable by an orchestrator).
+        # Any other mode leaves agy prompting (nothing to translate).
+        if sub_spec.executor.config.get("permission_mode") == "bypassPermissions":
+            return _validate_terminal_launch_args(["--dangerously-skip-permissions"])
+        return None
     return None
 
 
@@ -13343,8 +13355,7 @@ async def _create_session_from_existing_agent(
         await asyncio.to_thread(conversation_store.set_labels, conv.id, _merged)
         conv = await asyncio.to_thread(conversation_store.get_conversation, conv.id)
     elif conv.harness_override and (
-        conv.harness_override.startswith("acp:")
-        or conv.harness_override in ("grok", "grok-build")
+        conv.harness_override.startswith("acp:") or conv.harness_override in ("grok", "grok-build")
     ):
         # Generic-ACP session (acp:<slug>) or the builtin ``grok`` ACP harness:
         # tag it so the web model picker and the model-options fetch recognize it

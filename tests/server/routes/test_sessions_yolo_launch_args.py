@@ -196,3 +196,32 @@ def test_non_native_harness_with_bypass_fields_is_ignored(harness: str) -> None:
         {"harness": harness, "permission_mode": "bypassPermissions", "yolo": "True"}
     )
     assert _derive_terminal_launch_args_from_spec(spec) is None
+
+
+def test_antigravity_native_bypass_translates_to_skip_flag() -> None:
+    """
+    antigravity-native + ``permission_mode: bypassPermissions`` ->
+    ``["--dangerously-skip-permissions"]``.
+
+    agy has no ``--permission-mode`` analogue — its only pre-emptive control
+    is the all-or-nothing skip flag. A failure here means a headless polly
+    antigravity worker launches at agy's default ``request-review`` and parks
+    on "Requesting permission for: ..." — a TUI prompt an orchestrator can't
+    answer, so the whole dispatch stalls.
+    """
+    spec = _spec_with_config(
+        {"harness": "antigravity-native", "permission_mode": "bypassPermissions"}
+    )
+    assert _derive_terminal_launch_args_from_spec(spec) == ["--dangerously-skip-permissions"]
+
+
+def test_antigravity_native_without_bypass_returns_none() -> None:
+    """
+    antigravity-native without an explicit bypass keeps prompting (``None``).
+
+    Mirrors claude-native's opt-in contract: only ``bypassPermissions`` is
+    translated. Any other / absent mode leaves agy at request-review, so this
+    must NOT emit a flag (there is nothing to translate).
+    """
+    spec = _spec_with_config({"harness": "antigravity-native"})
+    assert _derive_terminal_launch_args_from_spec(spec) is None
