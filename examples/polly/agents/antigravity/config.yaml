@@ -4,10 +4,18 @@ description: Antigravity (Google Gemini) coding sub-agent — implements, cross-
 
 # Native Antigravity (agy) CLI-wrapping TUI harness: runs in its own terminal
 # the human can open in the Subagents panel and watch or take over.
+#
+# agy's only pre-emptive permission control is the all-or-nothing bypass flag,
+# and its auto-bypass otherwise triggers only on a headless (no-TTY) launch. A
+# polly sub-agent is web-ATTENDED (watchable in the Subagents panel), so it is
+# NOT headless and would sit waiting on interactive selections the orchestrator
+# can't answer. Set the explicit bypass so the worker runs unattended; the
+# omnigent blast_radius guardrail below still gates the catastrophic set.
 executor:
   type: omnigent
   config:
     harness: antigravity-native
+    permission_mode: bypassPermissions
 
 prompt: |
   You are Antigravity, a coding sub-agent dispatched by the polly
