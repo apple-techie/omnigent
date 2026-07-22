@@ -39,6 +39,7 @@ from omnigent.onboarding.harness_install import (
     COPILOT_KEY,
     CURSOR_KEY,
     GOOSE_KEY,
+    GROK_KEY,
     HERMES_KEY,
     KIMI_KEY,
     KIRO_KEY,
@@ -221,6 +222,11 @@ def harness_is_configured(harness: str) -> bool:
         # Auth/provider state surfaces at run time via Goose's own config; the
         # daemon gates only on binary presence.
         return harness_cli_installed(GOOSE_KEY)
+    if canonical == GROK_KEY:
+        # Grok Build (``harness: grok``, drives ``grok agent stdio``) wraps the
+        # ``grok`` CLI. Auth (xAI OAuth / XAI_API_KEY) surfaces at run time; the
+        # daemon gates only on binary presence, like the other own-auth CLIs.
+        return harness_cli_installed(GROK_KEY)
     if canonical in _HERMES_NATIVE_HARNESSES or canonical == HERMES_KEY:
         # Hermes — both the native TUI (``hermes-native`` / ``native-hermes``,
         # via ``omni hermes``) and the headless subprocess harness (``hermes``)

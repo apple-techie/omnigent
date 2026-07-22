@@ -13237,11 +13237,14 @@ async def _create_session_from_existing_agent(
         _merged.update(_sa_labels)
         await asyncio.to_thread(conversation_store.set_labels, conv.id, _merged)
         conv = await asyncio.to_thread(conversation_store.get_conversation, conv.id)
-    elif conv.harness_override and conv.harness_override.startswith("acp:"):
-        # Generic-ACP session: tag it so the web model picker and the
-        # model-options fetch recognize it — ACP agents own their model list
-        # (SessionModelState) but have no native-agent registration to carry
-        # the wrapper label.
+    elif conv.harness_override and (
+        conv.harness_override.startswith("acp:")
+        or conv.harness_override in ("grok", "grok-build")
+    ):
+        # Generic-ACP session (acp:<slug>) or the builtin ``grok`` ACP harness:
+        # tag it so the web model picker and the model-options fetch recognize it
+        # — ACP agents own their model list (SessionModelState) but have no
+        # native-agent registration to carry the wrapper label.
         _acp_labels = dict(body.labels) if body.labels else {}
         _acp_labels[_CLAUDE_NATIVE_WRAPPER_LABEL_KEY] = _ACP_WRAPPER_LABEL_VALUE
         await asyncio.to_thread(conversation_store.set_labels, conv.id, _acp_labels)

@@ -18203,7 +18203,10 @@ def create_runner_app(
         running = (
             process_manager.running_harness(session_id) if process_manager is not None else None
         )
-        if harness == "acp" or running == "acp":
+        # ``grok`` is a builtin ACP harness driving the same AcpExecutor, so its
+        # model list flows through the same harness /model-options route.
+        _ACP_MODEL_HARNESSES = ("acp", "grok")
+        if harness in _ACP_MODEL_HARNESSES or running in _ACP_MODEL_HARNESSES:
             # ACP agents own their model list (session/new SessionModelState);
             # ask the running harness subprocess. No live harness yet (no turn
             # run) -> empty, so the picker simply shows nothing until it loads.
