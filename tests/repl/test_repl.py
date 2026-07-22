@@ -2967,3 +2967,19 @@ def test_resume_hint_appends_resume_flag_to_invocation_parts() -> None:
         "--harness claude-sdk "
         "--resume conv_abc"
     )
+
+
+def test_model_readout_acp_harness_reports_agent_not_provider() -> None:
+    """ACP-based harnesses own their model — the readout must not fall back to a
+    misleading Omnigent provider credential (e.g. gpt-5.5)."""
+    from omnigent.repl._repl import _build_model_readout_lines
+
+    for harness in ("acp", "grok", "acp:droid"):
+        lines = _build_model_readout_lines({}, harness, "claude-fable-5")
+        assert any("ACP agent" in line for line in lines), (harness, lines)
+        assert any("claude-fable-5" in line for line in lines), (harness, lines)
+        assert not any("gpt-5.5" in line for line in lines), (harness, lines)
+
+    # No override -> the agent's own default, still no provider fabrication.
+    lines = _build_model_readout_lines({}, "acp:droid", None)
+    assert any("agent's own default" in line for line in lines), lines
