@@ -118,6 +118,7 @@ _SHIPPED_SUB_AGENT_EXAMPLES = [
             "droid",
             "kimi",
             "antigravity",
+            "goose",
         },
     ),
     ("debby", app._DEBBY_BUNDLE_SOURCE, {"claude", "gpt"}),
