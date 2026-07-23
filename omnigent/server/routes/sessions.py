@@ -90,6 +90,7 @@ from omnigent.harness_plugins import (
     CLAUDE_NATIVE_CODING_AGENT,
     CODEX_NATIVE_CODING_AGENT,
     CURSOR_NATIVE_CODING_AGENT,
+    KIMI_NATIVE_CODING_AGENT,
     KIRO_NATIVE_CODING_AGENT,
     OPENCODE_NATIVE_CODING_AGENT,
     PI_NATIVE_CODING_AGENT,
@@ -623,6 +624,7 @@ _OPENCODE_NATIVE_WRAPPER_LABEL_VALUE = OPENCODE_NATIVE_CODING_AGENT.wrapper_labe
 _CURSOR_NATIVE_WRAPPER_LABEL_VALUE = CURSOR_NATIVE_CODING_AGENT.wrapper_label
 _CURSOR_NATIVE_HARNESS = CURSOR_NATIVE_CODING_AGENT.harness
 _ANTIGRAVITY_NATIVE_HARNESS = ANTIGRAVITY_NATIVE_CODING_AGENT.harness
+_KIMI_NATIVE_HARNESS = KIMI_NATIVE_CODING_AGENT.harness
 _KIRO_NATIVE_WRAPPER_LABEL_VALUE = KIRO_NATIVE_CODING_AGENT.wrapper_label
 _PI_NATIVE_WRAPPER_LABEL_VALUE = PI_NATIVE_CODING_AGENT.wrapper_label
 # Generic-ACP sessions aren't a NativeCodingAgent, but they own a model list
@@ -12898,6 +12900,15 @@ def _derive_terminal_launch_args_from_spec(sub_spec: AgentSpec) -> list[str] | N
         # Any other mode leaves agy prompting (nothing to translate).
         if sub_spec.executor.config.get("permission_mode") == "bypassPermissions":
             return _validate_terminal_launch_args(["--dangerously-skip-permissions"])
+        return None
+    if harness == _KIMI_NATIVE_HARNESS:
+        # kimi's pre-emptive control is ``-y/--yolo`` (auto-approve tool calls).
+        # Mirror claude-native's opt-in-verbatim contract — translate only an
+        # explicit bypassPermissions so a headless polly worker doesn't stall on
+        # kimi's in-TUI approval menu (unanswerable by an orchestrator). Any
+        # other mode leaves kimi prompting (nothing to translate).
+        if sub_spec.executor.config.get("permission_mode") == "bypassPermissions":
+            return _validate_terminal_launch_args(["--yolo"])
         return None
     return None
 

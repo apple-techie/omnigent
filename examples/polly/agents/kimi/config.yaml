@@ -8,6 +8,7 @@ executor:
   type: omnigent
   config:
     harness: kimi-native
+    permission_mode: bypassPermissions
 
 prompt: |
   You are Kimi, a coding sub-agent dispatched by the polly

@@ -225,3 +225,28 @@ def test_antigravity_native_without_bypass_returns_none() -> None:
     """
     spec = _spec_with_config({"harness": "antigravity-native"})
     assert _derive_terminal_launch_args_from_spec(spec) is None
+
+
+def test_kimi_native_bypass_translates_to_yolo_flag() -> None:
+    """
+    kimi-native + ``permission_mode: bypassPermissions`` -> ``["--yolo"]``.
+
+    kimi's only pre-emptive control is ``-y/--yolo`` (auto-approve tool calls).
+    A failure here means a headless polly kimi worker launches at kimi's default
+    and parks on its in-TUI approval menu ("Run this command? 1. Approve once"),
+    which an orchestrator can't answer, stalling the dispatch.
+    """
+    spec = _spec_with_config({"harness": "kimi-native", "permission_mode": "bypassPermissions"})
+    assert _derive_terminal_launch_args_from_spec(spec) == ["--yolo"]
+
+
+def test_kimi_native_without_bypass_returns_none() -> None:
+    """
+    kimi-native without an explicit bypass keeps prompting (``None``).
+
+    Mirrors claude-native's opt-in contract: only ``bypassPermissions`` is
+    translated, so a read-only / must-keep-prompting kimi worker still surfaces
+    its approval menu.
+    """
+    spec = _spec_with_config({"harness": "kimi-native"})
+    assert _derive_terminal_launch_args_from_spec(spec) is None
