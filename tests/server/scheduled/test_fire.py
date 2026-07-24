@@ -57,6 +57,21 @@ class FakeAgentStore:
         return self.agents.get(agent_id)
 
 
+class _FakeLoadedAgent:
+    def __init__(self, spec: Any) -> None:
+        self.spec = spec
+
+
+class FakeAgentCache:
+    """Returns a fixed spec for load(); stands in for the bundle loader."""
+
+    def __init__(self, spec: Any) -> None:
+        self._spec = spec
+
+    def load(self, agent_id: str, bundle_location: str) -> _FakeLoadedAgent:
+        return _FakeLoadedAgent(self._spec)
+
+
 class FakeScheduledTaskStore:
     """Records update/create_run calls and serves get() from a dict."""
 
@@ -978,3 +993,77 @@ async def test_managed_sandbox_is_skipped_and_recorded() -> None:
     assert launched == []
     assert len(store.runs) == 1
     assert store.runs[0]["status"] == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_native_harness_run_forces_permission_bypass() -> None:
+    """A scheduled native-terminal run launches with the harness bypass flag.
+
+    A scheduled task has no human to answer a native harness's tool-permission
+    prompt, so the fire path must force the don't-prompt flag or the terminal
+    parks on readiness. omnigent's own policy hook still gates tool use.
+    """
+    from omnigent.spec.types import AgentSpec, ExecutorSpec
+
+    spec = AgentSpec(
+        spec_version=1,
+        name="news",
+        executor=ExecutorSpec(type="omnigent", config={"harness": "claude-native"}),
+    )
+    conv_store = FakeConversationStore()
+    agent_store = FakeAgentStore({"ag_1": _FakeAgent("ag_1", bundle_location="bundle://ag_1")})
+    store = FakeScheduledTaskStore(rows={"task_1": _task()})
+
+    async def _launch(conv: Any, task: Any) -> None:
+        return None
+
+    on_fire = build_on_fire(
+        _deps(
+            store,
+            conversation_store=conv_store,
+            agent_store=agent_store,
+            agent_cache=FakeAgentCache(spec),
+        ),
+        launch_dispatch=_launch,
+    )
+    await on_fire(0, "task_1")
+    await _drain()
+
+    assert len(conv_store.created) == 1
+    assert conv_store.created[0]["terminal_launch_args"] == [
+        "--permission-mode",
+        "bypassPermissions",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_non_native_harness_run_sets_no_launch_args() -> None:
+    """A non-native (SDK) scheduled run passes no launch args (nothing to bypass)."""
+    from omnigent.spec.types import AgentSpec, ExecutorSpec
+
+    spec = AgentSpec(
+        spec_version=1,
+        name="sdk",
+        executor=ExecutorSpec(type="omnigent", config={"harness": "claude-sdk"}),
+    )
+    conv_store = FakeConversationStore()
+    agent_store = FakeAgentStore({"ag_1": _FakeAgent("ag_1", bundle_location="bundle://ag_1")})
+    store = FakeScheduledTaskStore(rows={"task_1": _task()})
+
+    async def _launch(conv: Any, task: Any) -> None:
+        return None
+
+    on_fire = build_on_fire(
+        _deps(
+            store,
+            conversation_store=conv_store,
+            agent_store=agent_store,
+            agent_cache=FakeAgentCache(spec),
+        ),
+        launch_dispatch=_launch,
+    )
+    await on_fire(0, "task_1")
+    await _drain()
+
+    assert len(conv_store.created) == 1
+    assert conv_store.created[0]["terminal_launch_args"] is None

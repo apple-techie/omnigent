@@ -45,6 +45,7 @@ fire path.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import time
 import uuid
@@ -507,17 +508,61 @@ async def _resolve_default_workspace(deps: FireDeps, host_id: str) -> str:
     return canonical
 
 
+async def _headless_terminal_launch_args(deps: FireDeps, task: ScheduledTask) -> list[str] | None:
+    """Force a native harness to skip its tool-permission prompt for this run.
+
+    A scheduled task fires with no human present, so a native-terminal harness
+    that stops to ask (Claude Code's approval menu, agy's request-review, kimi's
+    in-TUI menu) parks forever and the run times out on terminal readiness.
+    Force the harness's don't-prompt flag — omnigent's own PreToolUse policy
+    hook still gates every tool call, so this only suppresses the interactive
+    prompt, mirroring the headless polly sub-agent contract.
+
+    Best-effort: any resolution failure returns ``None`` and the run proceeds
+    at the harness default rather than being blocked.
+    """
+    if deps.agent_cache is None:
+        return None
+    agent = await asyncio.to_thread(deps.agent_store.get, task.agent_id)
+    if agent is None or getattr(agent, "bundle_location", None) is None:
+        return None
+    try:
+        loaded = await asyncio.to_thread(deps.agent_cache.load, agent.id, agent.bundle_location)
+        spec = loaded.spec
+        # Synthesize the opt-in the sub-agent path reads so every native harness
+        # yields its own bypass flag (and non-native harnesses yield None),
+        # reusing the single source of truth for the per-harness flag mapping.
+        forced_config = {**(spec.executor.config or {}), "permission_mode": "bypassPermissions"}
+        forced_spec = dataclasses.replace(
+            spec, executor=dataclasses.replace(spec.executor, config=forced_config)
+        )
+        from omnigent.server.routes._sessions.helpers import (
+            _derive_terminal_launch_args_from_spec,
+        )
+
+        return _derive_terminal_launch_args_from_spec(forced_spec)
+    except Exception:
+        _logger.exception(
+            "scheduled fire: could not derive headless launch args for task %s; "
+            "running at harness default",
+            task.id,
+        )
+        return None
+
+
 async def _create_session(deps: FireDeps, task: ScheduledTask) -> Conversation:
     """Create a conversation bound to the task's agent, carrying the stored spec."""
     # Connected-host, existing-workspace runs create the conversation directly.
     # Future execution modes such as managed sandbox, branch selection, and
     # replay/backfill must use shared session-create orchestration.
+    launch_args = await _headless_terminal_launch_args(deps, task)
     conv = await asyncio.to_thread(
         deps.conversation_store.create_conversation,
         agent_id=task.agent_id,
         title=task.name,
         host_id=task.host_id,
         workspace=task.workspace,
+        terminal_launch_args=launch_args,
     )
     if task.model_override is not None or task.reasoning_effort is not None:
         updated = await asyncio.to_thread(
