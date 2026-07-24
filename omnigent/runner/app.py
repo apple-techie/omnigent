@@ -48,6 +48,7 @@ from omnigent.harness_aliases import (
     native_terminal_name,
 )
 from omnigent.harness_plugins import load_object, model_env_keys, spawn_env_builders
+from omnigent.inner.native_attachments import has_unresolved_file_id, resolve_file_id_block
 from omnigent.llms.summarize import (
     build_summarization_input,
     build_summarization_prompt,
@@ -828,61 +829,22 @@ async def _resolve_forwarded_message_content(
     file resource endpoint and inline them before handing content to a
     harness. Blocks already resolved by the server pass through.
     """
-    if not any(isinstance(block, dict) and "file_id" in block for block in content):
+    if not any(isinstance(block, dict) and has_unresolved_file_id(block) for block in content):
         return content
-
-    import base64 as _base64
 
     resolved: list[dict[str, Any]] = []
     changed = False
     for block in content:
-        if not isinstance(block, dict) or "file_id" not in block:
-            resolved.append(block)
-            continue
-        file_id = block.get("file_id")
-        if not isinstance(file_id, str) or not file_id:
-            resolved.append(block)
-            continue
-        try:
-            meta_resp = await server_client.get(
-                f"/v1/sessions/{session_id}/resources/files/{file_id}",
-                timeout=10.0,
+        new_block = None
+        if isinstance(block, dict) and has_unresolved_file_id(block):
+            new_block = await resolve_file_id_block(
+                block, session_id=session_id, client=server_client
             )
-            content_resp = await server_client.get(
-                f"/v1/sessions/{session_id}/resources/files/{file_id}/content",
-                timeout=30.0,
-            )
-            meta_resp.raise_for_status()
-            content_resp.raise_for_status()
-        except httpx.HTTPError:
-            _logger.warning(
-                "runner failed to resolve file_id=%s for session=%s",
-                file_id,
-                session_id,
-                exc_info=True,
-            )
+        if new_block is None:
             resolved.append(block)
-            continue
-
-        meta = meta_resp.json()
-        content_type = (
-            meta.get("content_type")
-            or content_resp.headers.get("content-type")
-            or "application/octet-stream"
-        )
-        # Strip any charset suffix: data URIs need the media type hint.
-        if isinstance(content_type, str):
-            content_type = content_type.split(";", 1)[0]
         else:
-            content_type = "application/octet-stream"
-        encoded = _base64.b64encode(content_resp.content).decode("ascii")
-        new_block = {k: v for k, v in block.items() if k != "file_id"}
-        if block.get("type") == "input_image":
-            new_block["image_url"] = f"data:{content_type};base64,{encoded}"
-        else:
-            new_block["file_data"] = f"data:{content_type};base64,{encoded}"
-        resolved.append(new_block)
-        changed = True
+            resolved.append(new_block)
+            changed = True
 
     return resolved if changed else content
 
@@ -3422,10 +3384,19 @@ def create_runner_app(
                     finally:
                         _publish_terminal_pending(_publish_event, session_id, False)
 
-        history = (
-            [] if is_native_harness(harness_name) else await _load_history_as_input(session_id)
-        )
-        if history and not is_native_harness(harness_name):
+        # Crash recovery (Step 8.5 Scenario A): if the session
+        # has existing history, check whether the last item
+        # indicates an incomplete turn that needs restarting.
+        # Native terminal transcripts are mirrored from the underlying
+        # runtime — a trailing user item can be a real failed native turn —
+        # so skip the history load (and its attachment downloads) entirely.
+        history: list[dict[str, Any]]
+        if is_native_harness(harness_name):
+            await _seed_last_server_item_id(session_id)
+            history = []
+        else:
+            history = await _load_history_as_input(session_id)
+        if history:
             _session_histories[session_id] = history
             last = history[-1]
             last_type = last.get("type")
@@ -3696,6 +3667,43 @@ def create_runner_app(
             },
         )
 
+    async def _seed_last_server_item_id(session_id: str) -> None:
+        """
+        Record the newest server item ID without loading history.
+
+        Native-harness sessions never call ``_load_history_as_input``
+        (their transcripts are mirrored from the underlying runtime), but
+        harness compaction persistence still needs the latest server item
+        ID as its anchor — fetch just that ID.
+
+        :param session_id: Session/conversation identifier,
+            e.g. ``"conv_abc123"``.
+        """
+        try:
+            resp = await server_client.get(
+                f"/v1/sessions/{session_id}/items",
+                params={"limit": "1", "order": "desc"},
+                timeout=10.0,
+            )
+            if resp.status_code != 200:
+                _logger.warning(
+                    "Last-item seed returned %d for session=%s",
+                    resp.status_code,
+                    session_id,
+                )
+                return
+            page_items = resp.json().get("data", [])
+        except (httpx.HTTPError, ValueError):
+            _logger.warning(
+                "Last-item seed failed for session=%s",
+                session_id,
+                exc_info=True,
+            )
+            return
+        last_id = page_items[0].get("id") if page_items else None
+        if last_id:
+            _last_server_item_id[session_id] = last_id
+
     async def _load_history_as_input(
         session_id: str,
         drop_item_id: str | None = None,
@@ -3744,7 +3752,19 @@ def create_runner_app(
         if drop_item_id is not None:
             all_items = [it for it in all_items if it.get("id") != drop_item_id]
 
-        return _convert_raw_items_to_input(all_items)
+        converted = _convert_raw_items_to_input(all_items)
+        # Items are persisted pre-resolution, so reloaded history can still
+        # carry raw file_id blocks (the runner has no file/artifact stores).
+        # Resolve them the same way current-turn intake does.
+        for item in converted:
+            content = item.get("content")
+            if item.get("type") == "message" and isinstance(content, list):
+                item["content"] = await _resolve_forwarded_message_content(
+                    content,
+                    session_id=session_id,
+                    server_client=server_client,
+                )
+        return converted
 
     def _convert_raw_items_to_input(
         items: list[dict[str, Any]],
@@ -7988,14 +8008,66 @@ def create_runner_app(
         )
 
     async def _ensure_native_terminal_for_turn(conv_id: str, harness_name: str | None) -> None:
+        """Re-create a reaped native pane before forwarding a turn (#1349 self-heal).
+
+        The native-pane idle reaper may reclaim an idle pane while a session sits
+        between turns. ``NativeServerHarness.run_turn`` forwards into the live
+        pane and assumes it exists, so a turn arriving WITHOUT a client handshake
+        (a sub-agent or API forward to a long-idle session) would otherwise inject
+        into a dead tmux target and lose the message. This re-ensures the pane
+        first. Idempotent: a no-op when the harness is not a native CLI harness or
+        the pane is already live. Reuses ``create_session_terminal``'s
+        ``ensure_native_terminal`` path, so the pane resumes via the vendor CLI's
+        own ``--resume`` (no fresh-start, no lost history).
+
+        Detection has two layers: (1) the reaper POPPING the registry entry
+        when it reaps (``registry.close()`` -> ``get()`` returns ``None``),
+        and (2) an ``is_alive()`` probe when the registry entry exists, catching
+        crashed-but-registered panes (tmux killed externally without
+        ``close()``). The probe runs only when a turn arrives, not on a
+        poll. Every native short-name this can target has a matching
+        ``ensure_native_terminal`` branch in ``create_session_terminal``
+        (kept in lockstep with ``harness_aliases.NATIVE_HARNESSES``).
+        """
         terminal_name = native_terminal_name(harness_name)
         if terminal_name is None:
             return
         terminal_registry = resource_registry.terminal_registry if resource_registry else None
         if terminal_registry is None:
             return
-        if terminal_registry.get(conv_id, terminal_name, "main") is not None:
-            return  # a pane is still registered — nothing to heal
+        instance = terminal_registry.get(conv_id, terminal_name, "main")
+        if instance is not None:
+            if await instance.is_alive():
+                return  # pane is registered and alive — nothing to heal
+            _logger.info(
+                "native pane registered but dead for conv=%s harness=%s; closing stale entry",
+                conv_id,
+                harness_name,
+            )
+            # Re-check the registry before closing: a concurrent ensure/recreate
+            # path may have already replaced this entry with a live pane between
+            # our get() and now.  Only close if the registry still points at the
+            # same dead instance we just probed.
+            current = terminal_registry.get(conv_id, terminal_name, "main")
+            if current is instance:
+                # is_alive() set instance.running=False as a side effect;
+                # restore it so close() issues tmux kill-server.
+                instance.running = True
+                try:
+                    await terminal_registry.close(conv_id, terminal_name, "main")
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001 — cleanup is best-effort
+                    _logger.warning(
+                        "failed to close stale native pane for conv=%s; proceeding to re-create",
+                        conv_id,
+                        exc_info=True,
+                    )
+            else:
+                _logger.info(
+                    "stale entry already replaced for conv=%s; skipping close",
+                    conv_id,
+                )
         _logger.info(
             "native pane missing for conv=%s harness=%s; re-ensuring before turn (#1349)",
             conv_id,
